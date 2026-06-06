@@ -1,0 +1,7 @@
+# Claude Code 머신별 로컬 설정 (권한 등) — PC마다 다르므로 제외
+.claude/settings.local.json
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+*.swp

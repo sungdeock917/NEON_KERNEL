@@ -1,0 +1,1841 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>NEON KERNEL — Control Prototype</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #04060a; touch-action: none; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: radial-gradient(circle at 50% 50%, #0a1018 0%, #04060a 70%); cursor: crosshair; }
+  /* 텍스트 제로 원칙: 게임 자체엔 텍스트가 없지만, 프로토타입 테스터이므로
+     디버그/조작 안내 오버레이만 최소한으로 둔다 (H로 토글). */
+  #help {
+    position: fixed; left: 12px; bottom: 12px; max-width: 340px;
+    font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color: #5fd9c8; background: rgba(4,12,16,.72); border: 1px solid #134; border-radius: 8px;
+    padding: 10px 12px; pointer-events: none; user-select: none; letter-spacing: .2px;
+  }
+  #help b { color: #aef7ea; }
+  #help .key { color: #ffd66e; }
+  #help.hidden { display: none; }
+  #hud {
+    position: fixed; right: 12px; top: 12px; text-align: right;
+    font: 11px/1.45 ui-monospace, monospace; color: #38b0a3; pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="help">
+  <b>NEON KERNEL — 조작 프로토타입</b><br>
+  <span class="key">탭/클릭(짧게)</span> = 회전 방향 반전 (탁)<br>
+  <span class="key">길게 누름/홀드</span> = 브레이크 · 6방향 고정사격 (꾹)<br>
+  &nbsp;&nbsp;↳ 과열 유지 후 <b>떼는 순간</b> = 오버히트 노바<br>
+  <b style="color:#aef7ea">─ 합성(정비 궤도) ─</b> 회전 정지 · 2단계 이산 선택<br>
+  ①후보: <span class="key">탁</span>=다음 후보, <span class="key">꾹</span>=확정<br>
+  ②코어→슬롯: <span class="key">탁</span>=다음 슬롯, <span class="key">꾹</span>=흡수 / 스탯강화(골드◆)→대상 코어 선택<br>
+  &nbsp;&nbsp;↳ 같은 색 T1 인접=T2, T2 인접=T3 / 후반일수록 스탯강화(B) 비율↑<br>
+  <span class="key">Enter</span> 정비궤도 진입 &nbsp; <span class="key">C</span> 후보 재추첨 &nbsp; <span class="key">L</span> 해금 슬롯 3~6<br>
+  <b style="color:#aef7ea">─ 코어 시험장 ─</b> <span class="key">B</span> 토글<br>
+  &nbsp;&nbsp;<span class="key">1~8</span> / <span class="key">[ ]</span> T1 8종 코어 전환해 손맛 비교<br>
+  <span class="key">R</span> 재시작 &nbsp; <span class="key">H</span> 안내 숨김
+</div>
+<div id="hud"></div>
+<script>
+"use strict";
+//============================================================================
+// NEON KERNEL — Control-Feel Prototype  (single-file canvas)
+// 정의서 2.1 / 2.3 / 7 / 10 의 코어 루프만 구현: 탁(반전)·꾹(브레이크/드레인/노바)
+//============================================================================
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const hud = document.getElementById('hud');
+const help = document.getElementById('help');
+
+// ---- 화면 / 좌표 ----------------------------------------------------------
+let W = 0, H = 0, CX = 0, CY = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  cv.width = Math.floor(W * DPR); cv.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  CX = W / 2; CY = H / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- 유틸 -----------------------------------------------------------------
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const norm = a => { a %= TAU; return a < 0 ? a + TAU : a; };
+// 두 각도 간 최소 차이 (절대값)
+function angDiff(a, b) { let d = norm(a) - norm(b); if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return Math.abs(d); }
+
+// ---- 튜닝 상수 (정의서 수치 근사) ----------------------------------------
+const CFG = {
+  slotCount: 6,            // 6궤도
+  orbitR: 56,             // 슬롯 궤도 반경 — 본체에 가깝게(타이트한 포탑감)
+  rotSpeed: 0.95,         // 자동 회전 속도(rad/s) — 살짝 답답하게(정의서 9.4 ②) → 조준 여유 + 스윕 커버리지↑
+  brakeFireScale: 0.7,    // 브레이크 시 발사간격 배율(점사 더 촘촘)
+  iframe: 0.5,            // 피격 무적 0.5s (정의서 2.3)
+  // 브레이크 과열 드레인: 0~1.5s 1%/s, 1.5~3s 3%/s, 3s+ 5%/s
+  drainStages: [[1.5, 1], [3.0, 3], [Infinity, 5]],
+  novaChargeStart: 3.0,   // 과부하(3s+) 진입부터 노바 게이지 충전
+  novaChargeTime: 2.2,    // 가득 차기까지 시간(s)
+  novaRadius: 320,
+  hpRecoverWaveClear: 10, // 웨이브 클리어 +10%
+  interceptPad: 5,        // 적탄 요격 판정 여유(px) — 얇은선∩얇은점 취약성 완화
+  // 정비 궤도(합성)
+  candidateR: 200,        // 후보 코어 공전 반경
+  orbitHold: 0.3,         // 정비 궤도 꾹(확정) 판정 시간(s). 그 전 떼면 탁(다음 항목)
+  mergeSlide: 0.34,       // 압축: 재료 코어가 베이스로 이동하는 시간(s)
+  mergePause: 0.24,       // 압축: 한 단계 합쳐진 뒤 다음 단계까지 텀(s) — 연쇄 가독성
+};
+
+// ---- 4대 속성 (정의서 5장) ------------------------------------------------
+const ATTR = {
+  mint:   { color:'#39f4d0', name:'패킷'  }, // ⚡ 민트
+  red:    { color:'#ff5d54', name:'소스'  }, // 🔥 레드
+  purple: { color:'#b97cff', name:'마이그'}, // 🕳️ 퍼플
+  grey:   { color:'#c2cbd4', name:'스크랩'}, // ⚙️ 그레이
+};
+const ATTR_KEYS = ['mint', 'red', 'purple', 'grey'];
+
+// ---- 티어별 사격 스탯 (정의서 4장: 가닥수/두께/흐름속도/사거리) -------------
+// 티어가 곧 체급. 합성으로 티어가 오르면 화력이 계단식으로 폭발 → "위상 정렬"의 의미.
+// (정밀 스탯합산 α는 15장 밸런싱 미정 → 프로토타입은 티어 기반 근사)
+const TIER_STATS = {
+  1: { strands:1, spread:0,    interval:0.20, bulletR:5, speed:600, life:1.0,  pierce:0, dmg:1,   lw:1.5 },
+  2: { strands:2, spread:0.16, interval:0.13, bulletR:5, speed:645, life:1.05, pierce:0, dmg:1.4, lw:2.0 },
+  3: { strands:3, spread:0.26, interval:0.10, bulletR:6, speed:690, life:1.15, pierce:1, dmg:1.8, lw:2.8 },
+};
+
+// T3 색조합 10종 지정효과 (정의서 6.3) — 이름·설명·실제 효과
+//  coreMod(c): 생성 시 스탯 변형(동색 오버클록 등). onHit(b,e): 명중 시 효과(이종 합선 등).
+const COMBO_FX = {
+  // 동색 4 — 오버클록(체급 폭발, 메커니즘 유지)
+  'mint+mint':     { name:'하이퍼클록', fx:'탄속·연사 대폭↑', coreMod(c){ c.speed*=1.5; c.interval*=0.55; } },
+  'red+red':       { name:'멜트다운', fx:'전탄 치명+과열 3배', coreMod(c){ c.dmg*=1.8; }, onHit(b,e){ e.burn={dps:7,time:2.6}; } },
+  'purple+purple': { name:'이벤트호라이즌', fx:'판정 200%↑·적탄 흡수', coreMod(c){ c.bulletR*=2; }, absorb:true },
+  'grey+grey':     { name:'타이탄웨이트', fx:'단발 깡댐 400%·경직', coreMod(c){ c.strands=Math.max(1,c.strands-1); c.bulletR*=1.9; c.dmg*=4; c.interval*=1.5; }, onHit(b,e){ const a=Math.atan2(e.y-CY,e.x-CX); e.kvx=Math.cos(a)*70; e.kvy=Math.sin(a)*70; e.held=Math.max(e.held||0,0.5); } },
+  // 이종 6 — 합선(신규 메커니즘). 스폰 효과(폭발/장판/복사본)는 b._cf로 탄당 1회 제한
+  'mint+red':      { name:'코드과부하', fx:'연사 2배+과열 폭발', coreMod(c){ c.interval*=0.5; }, onHit(b,e){ if(e.burn&&e.burn.time>0){ if(!b._cf){ b._cf=true; comboExplode(e.x,e.y,b.color,46,2.5); } e.burn.time=0; } else e.burn={dps:3,time:1.6}; } },
+  'mint+purple':   { name:'동적동기화', fx:'투사체 연결+닿는 적 홀딩', onHit(b,e){ const a=Math.atan2(b.y-e.y,b.x-e.x); e.kvx=Math.cos(a)*70; e.kvy=Math.sin(a)*70; e.held=Math.max(e.held||0,0.5); } },
+  'grey+mint':     { name:'버퍼분열', fx:'명중 시 복사본 3개 분출', onHit(b,e){ if(!b._cf){ b._cf=true; comboMiniCopies(b,3); } } },
+  'purple+red':    { name:'디아블로코어', fx:'미세 인력 장판+과열', onHit(b,e){ if(!b._cf){ b._cf=true; comboHoldPuddle(b.x,b.y,b.color); } e.burn={dps:2,time:1.2}; } },
+  'grey+red':      { name:'열역학파쇄', fx:'장갑 파괴(받는 피해 1.5배)', onHit(b,e){ e.vuln=1.5; e.vulnT=2.6; } },
+  'grey+purple':   { name:'마그네틱임팩트', fx:'넉백 300%+광역 스플래시', onHit(b,e){ const a=Math.atan2(e.y-CY,e.x-CX); e.kvx=Math.cos(a)*320; e.kvy=Math.sin(a)*320; if(!b._cf){ b._cf=true; comboExplode(e.x,e.y,b.color,50,1.6); } } },
+};
+const COMBO_NAME = {}; for (const k in COMBO_FX) COMBO_NAME[k] = COMBO_FX[k].name;
+
+// 두 색 조합 키 (순서 무관)
+function comboKey(a, b) { return [a, b].sort().join('+'); }
+// hex 두 색 평균 (T3 표시색)
+function blend(h1, h2) {
+  const p = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+  const a = p(h1), b = p(h2);
+  const m = i => Math.round((a[i] + b[i]) / 2).toString(16).padStart(2, '0');
+  return '#' + m(0) + m(1) + m(2);
+}
+
+// T2/T3 코어 생성(압축 결과). inherit = 베이스 코어 → 거동 형태 계승(정의서 6.3 형태 유지).
+// (T1은 makeT1으로 생성. makeCore를 inherit 없이 부르면 직선 기본값)
+function makeCore(tier, colors, inherit, mat) {
+  const st = TIER_STATS[tier];
+  let color, label;
+  if (tier === 3) {
+    color = blend(ATTR[colors[0]].color, ATTR[colors[1]].color);
+    label = (COMBO_NAME[comboKey(colors[0], colors[1])] || 'T3') + '(T3)';
+  } else {
+    color = ATTR[colors[0]].color;
+    label = ATTR[colors[0]].name + (tier === 2 ? '(T2)' : '(T1)');
+  }
+  const behavior = inherit ? inherit.behavior : 'straight';
+  const bparams = inherit && inherit.bparams ? { ...inherit.bparams } : {};
+  // scatter는 가닥수/퍼짐이 정체성이므로 계승 시 유지
+  let strands = st.strands, spread = st.spread;
+  if (inherit && inherit.behavior === 'scatter') { strands = Math.max(st.strands, inherit.strands || 5); spread = inherit.spread || spread; }
+  // T3 혈통: 부모 두 T2의 거동(형태)을 기록 (글리프 위성 표시용)
+  const parentBeh = (tier === 3 && inherit && mat) ? [inherit.behavior, mat.behavior] : undefined;
+  const core = { tier, colors: colors.slice(), color, label, ...st, strands, spread, behavior, bparams, parentBeh, t1id: inherit ? inherit.t1id : undefined };
+  if (tier === 3) {
+    core.combo = comboKey(colors[0], colors[1]); // 색조합 키 (정의서 6.3)
+    const fx = COMBO_FX[core.combo];
+    if (fx && fx.coreMod) fx.coreMod(core); // 동색 오버클록 등 스탯 변형
+  }
+  return core;
+}
+
+// ---- 티어1 8종 코어 (정의서 6.1) — 각자 고유 사격 메커니즘 ----------------
+// behavior: 사격 거동. fx: 메커니즘 한 줄 설명(시험장 표시용).
+const T1_CORES = [
+  { id:'streamPing', name:'스트림 핑', attr:'mint',  behavior:'straight', fx:'직선 연사',
+    interval:0.16, speed:640, bulletR:5, life:1.0, dmg:1, lw:1.5, strands:1, spread:0 },
+  { id:'scatterPing', name:'스캐터 핑', attr:'mint',  behavior:'scatter', fx:'근거리 산탄(5발 부채꼴)',
+    interval:0.34, speed:520, bulletR:4, life:0.42, dmg:0.8, lw:1.6, strands:5, spread:0.42 },
+  { id:'dotSnippet', name:'도트 스니펫', attr:'red',  behavior:'dot', fx:'명중 시 과열 지속피해(DOT)',
+    interval:0.30, speed:620, bulletR:5, life:1.0, dmg:0.6, lw:1.6, strands:1, spread:0, dotDps:3, dotTime:1.6 },
+  { id:'areaSnippet', name:'에어리어 스니펫', attr:'red', behavior:'area', fx:'착탄 지점 소형 장판',
+    interval:0.55, speed:480, bulletR:6, life:0.5, dmg:0.5, lw:2.0, strands:1, spread:0, puddleR:30, puddleDps:3, puddleTime:1.1 },
+  { id:'pullIndex', name:'풀 인덱스', attr:'purple', behavior:'pull', fx:'비행 중 주변 적을 탄으로 끌어당김',
+    interval:0.26, speed:560, bulletR:5, life:1.05, dmg:0.8, lw:1.7, strands:1, spread:0, pullForce:240, pullTime:0.5 },
+  { id:'delayIndex', name:'딜레이 인덱스', attr:'purple', behavior:'delay', fx:'허공 정지 후 급가속(변칙)',
+    interval:0.38, speed:560, bulletR:5, life:1.8, dmg:1.4, lw:1.7, strands:1, spread:0, pauseAt:0.14, pauseFor:0.5, accel:1400 },
+  { id:'heavyJunk', name:'헤비 정크', attr:'grey', behavior:'knockback', fx:'중량 넉백(크게 밀쳐냄)',
+    interval:0.46, speed:420, bulletR:9, life:0.95, dmg:2.4, lw:2.6, strands:1, spread:0, knock:240 },
+  { id:'flashJunk', name:'플래시 정크', attr:'grey', behavior:'fragment', fx:'충돌 시 파편 5개 분열',
+    interval:0.4, speed:540, bulletR:6, life:0.9, dmg:1.2, lw:2.0, strands:1, spread:0, frags:5, fragSpeed:360, fragLife:0.3, fragDmg:0.6 },
+];
+
+// 거동 파라미터 키 (코어→탄 전달용)
+const BPARAM_KEYS = ['dotDps','dotTime','puddleR','puddleDps','puddleTime','pullForce','pullTime','pauseAt','pauseFor','accel','knock','frags','fragSpeed','fragLife','fragDmg',
+  // T2 신규 거동
+  'burstFrags','burstSpeed','burstSpread','burstLife','burstDmg','beamRange','beamWidth','beamDmgps','holdR','holdForce','holdTime','holdDps','shed','bounce'];
+function pickBparams(src) { const o = {}; for (const k of BPARAM_KEYS) if (src[k] != null) o[k] = src[k]; return o; }
+
+// 인덱스/색 조회
+const T1_BY_ID = {}; for (const s of T1_CORES) T1_BY_ID[s.id] = s;
+const T1_BY_COLOR = { mint: [], red: [], purple: [], grey: [] };
+for (const s of T1_CORES) T1_BY_COLOR[s.attr].push(s.id);
+const START_T1 = ['streamPing', 'dotSnippet', 'pullIndex', 'heavyJunk']; // 정의서 3.0 순수 직선형 4종
+
+// T1 서브타입 스펙 → 코어 인스턴스 (실제 게임/시험장 공용)
+function makeT1(spec) {
+  return { tier:1, t1id: spec.id, colors:[spec.attr], color: ATTR[spec.attr].color,
+    label: spec.name, behavior: spec.behavior, fx: spec.fx, pierce:0,
+    strands: spec.strands, spread: spec.spread, interval: spec.interval, bulletR: spec.bulletR,
+    speed: spec.speed, life: spec.life, dmg: spec.dmg, lw: spec.lw,
+    bparams: pickBparams(spec) };
+}
+function makeT1Id(id) { return makeT1(T1_BY_ID[id]); }
+
+// ---- 티어2 12종 코어 (정의서 6.2) — 동색 결합. 각자 T1과 구분되는 별도 정의 코어 ----
+// parents: 이 T2를 만드는 두 T1 서브타입(같은 색). 순혈=A+A/B+B, 융합=A+B.
+const T2_CORES = [
+  // 패킷(민트)
+  { id:'streaming', name:'스트리밍', attr:'mint', parents:['streamPing','streamPing'], behavior:'straight', fx:'관통 연사빔',
+    interval:0.13, speed:720, bulletR:5, life:1.1, dmg:1.4, lw:2.2, strands:1, spread:0, pierce:2 },
+  { id:'broadcast', name:'브로드캐스트', attr:'mint', parents:['scatterPing','scatterPing'], behavior:'scatter', fx:'광역 부채꼴 산탄(7발)',
+    interval:0.20, speed:600, bulletR:5, life:0.62, dmg:1.6, lw:2.0, strands:7, spread:0.4, pierce:0 },
+  { id:'burstShot', name:'버스트 샷', attr:'mint', parents:['streamPing','scatterPing'], behavior:'burst', fx:'직선 발사→착탄 시 산탄 폭발',
+    interval:0.3, speed:680, bulletR:5, life:0.7, dmg:1.0, lw:2.1, strands:1, spread:0, pierce:0, burstFrags:7, burstSpeed:380, burstSpread:1.4, burstLife:0.32, burstDmg:0.8 },
+  // 소스(레드)
+  { id:'execute', name:'익스큐트', attr:'red', parents:['dotSnippet','dotSnippet'], behavior:'straight', fx:'치명 단발 핵창(고댐)',
+    interval:0.52, speed:580, bulletR:10, life:1.1, dmg:7.5, lw:2.8, strands:1, spread:0, pierce:1 },
+  { id:'infiniteLoop', name:'인피니트 루프', attr:'red', parents:['areaSnippet','areaSnippet'], behavior:'area', fx:'대형 장판',
+    interval:0.7, speed:440, bulletR:7, life:0.55, dmg:0.6, lw:2.6, strands:1, spread:0, pierce:0, puddleR:64, puddleDps:5, puddleTime:2.6 },
+  { id:'overheatLaser', name:'오버히트 레이저', attr:'red', parents:['dotSnippet','areaSnippet'], behavior:'beam', fx:'범위 지속 화염 빔(관통 조사)',
+    interval:0.05, speed:0, bulletR:4, life:0.06, dmg:0, lw:2.6, strands:1, spread:0, pierce:0, beamRange:300, beamWidth:11, beamDmgps:9, dotDps:3, dotTime:1.0 },
+  // 마이그(퍼플)
+  { id:'synchronize', name:'싱크로나이즈', attr:'purple', parents:['pullIndex','pullIndex'], behavior:'pull', fx:'관통 인력',
+    interval:0.22, speed:600, bulletR:5, life:1.1, dmg:1.5, lw:2.2, strands:1, spread:0, pierce:2, pullForce:320, pullTime:0.6 },
+  { id:'timeout', name:'타임아웃', attr:'purple', parents:['delayIndex','delayIndex'], behavior:'delay', fx:'록온 변칙(강화 급가속)',
+    interval:0.26, speed:640, bulletR:5, life:2.0, dmg:2.6, lw:2.2, strands:1, spread:0, pierce:2, pauseAt:0.1, pauseFor:0.45, accel:1700 },
+  { id:'gravityOrbit', name:'중력 궤도', attr:'purple', parents:['pullIndex','delayIndex'], behavior:'hold', fx:'착탄 지점 중력장(끌어 묶어둠)',
+    interval:0.7, speed:520, bulletR:6, life:0.42, dmg:0.6, lw:2.3, strands:1, spread:0, pierce:0, holdR:74, holdForce:340, holdTime:1.8, holdDps:3 },
+  // 스크랩(그레이)
+  { id:'impactRail', name:'임팩트 레일', attr:'grey', parents:['heavyJunk','heavyJunk'], behavior:'knockback', fx:'강력 밀치기',
+    interval:0.34, speed:460, bulletR:11, life:1.0, dmg:3.6, lw:2.9, strands:1, spread:0, pierce:0, knock:360 },
+  { id:'fragmentCore', name:'프래그먼트', attr:'grey', parents:['flashJunk','flashJunk'], behavior:'fragment', fx:'벽 반사 비산(파편 8·튕김)',
+    interval:0.36, speed:560, bulletR:6, life:1.0, dmg:1.4, lw:2.3, strands:1, spread:0, pierce:0, frags:8, fragSpeed:400, fragLife:0.7, fragDmg:0.7, bounce:2 },
+  { id:'armorScatter', name:'철갑 산탄포', attr:'grey', parents:['heavyJunk','flashJunk'], behavior:'knockback', fx:'종방향 관통+파편 흘림',
+    interval:0.44, speed:540, bulletR:8, life:1.2, dmg:2.6, lw:2.7, strands:1, spread:0, pierce:3, knock:150, shed:2 },
+];
+const T2_BY_ID = {}; for (const s of T2_CORES) T2_BY_ID[s.id] = s;
+// 두 T1 서브타입 조합 → T2 스펙 룩업 (순서 무관)
+const T2_LOOKUP = {};
+for (const s of T2_CORES) T2_LOOKUP[[s.parents[0], s.parents[1]].sort().join('+')] = s;
+
+// T2 스펙 → 코어 인스턴스
+function makeT2(spec) {
+  return { tier:2, t2id: spec.id, colors:[spec.attr], color: ATTR[spec.attr].color,
+    label: spec.name, behavior: spec.behavior, fx: spec.fx, pierce: spec.pierce || 0,
+    parents: spec.parents.slice(), // 혈통 글리프용 (부모 두 T1 서브타입)
+    strands: spec.strands, spread: spec.spread, interval: spec.interval, bulletR: spec.bulletR,
+    speed: spec.speed, life: spec.life, dmg: spec.dmg, lw: spec.lw,
+    bparams: pickBparams(spec) };
+}
+// 두 T1 서브타입 → 정의된 T2 (정의서 6.2 1:1 대응)
+function makeT2FromIds(idA, idB) {
+  const spec = T2_LOOKUP[[idA, idB].sort().join('+')];
+  return spec ? makeT2(spec) : makeCore(2, [T1_BY_ID[idA].attr]); // 폴백
+}
+// 색 col의 T2 후보(완제품): 그 색의 3조합 중 무작위
+function makeT2OfColor(col) {
+  const [a, b] = T1_BY_COLOR[col];
+  const combos = [[a, a], [b, b], [a, b]];
+  const c = combos[(Math.random() * 3) | 0];
+  return makeT2FromIds(c[0], c[1]);
+}
+
+//============================================================================
+// 압축(합성) 규칙 — 정의서 3.3 / 6.3
+//============================================================================
+// 두 코어가 압축 가능한가? 가능하면 결과 사양 반환, 아니면 null.
+//  T1+T1: 같은 색일 때만 → 단색 T2.   T2+T2: 색 무관 → T3(조합).   T3: 천장(불가).
+function canCompress(a, b) {
+  if (!a || !b) return null;
+  if (a.tier === 1 && b.tier === 1 && a.colors[0] === b.colors[0]) return { tier: 2, colors: [a.colors[0]] };
+  if (a.tier === 2 && b.tier === 2) return { tier: 3, colors: [a.colors[0], b.colors[0]] };
+  return null;
+}
+
+// 슬롯 해금 순서: 0·2·4(삼각형) 먼저 → 1·3·5(사이 채움). 적은 슬롯도 360도 균등 배치.
+const SLOT_UNLOCK_ORDER = [0, 2, 4, 1, 3, 5];
+const SLOT_RANK = []; SLOT_UNLOCK_ORDER.forEach((s, r) => SLOT_RANK[s] = r);
+function isUnlocked(i) { return SLOT_RANK[i] < G.maxSlots; }
+// 슬롯 인접: 잠긴 슬롯을 건너뛴 '다음 해금 슬롯'이 이웃 (삼각형 배치도 서로 압축 가능)
+function cwOf(i)  { let j = (i + 1) % 6, g = 0; while (!isUnlocked(j) && g++ < 6) j = (j + 1) % 6; return j; }
+function ccwOf(i) { let j = (i + 5) % 6, g = 0; while (!isUnlocked(j) && g++ < 6) j = (j + 5) % 6; return j; }
+
+// 한 슬롯에 코어가 놓인 직후 인접 압축을 1패스 해소(연쇄 포함). arr를 직접 변형.
+//  steps가 주어지면 각 압축 단계를 기록(애니메이션용). 반환: 최종 결과 슬롯.
+function resolveCompression(arr, slot, steps) {
+  let cur = slot;
+  let guard = 0;
+  while (guard++ < 12) {
+    const core = arr[cur];
+    if (!core) return cur;
+    const ccw = ccwOf(cur), cw = cwOf(cur);
+    // cur을 한 쪽으로 묶는 두 후보 쌍 (base는 항상 반시계 쪽 코어)
+    const withCCW = canCompress(arr[ccw], arr[cur]); // ccw=base, cur=재료
+    const withCW  = canCompress(arr[cur], arr[cw]);  // cur=base, cw=재료
+    if (!withCCW && !withCW) return cur;              // 독립 장착 / 연쇄 종료
+    // 양옆 모두 가능 → 반시계 이웃 우선 (정의서 충돌 우선순위)
+    let basePos, matPos, res;
+    if (withCCW) { basePos = ccw; matPos = cur; res = withCCW; }
+    else         { basePos = cur; matPos = cw;  res = withCW; }
+
+    // --- 반시계 예외 (T1+T1→T2 한정, 1수 앞보기) ---
+    // 기본(반시계) 자리로는 다음 압축 불가하나, 시계 자리로 옮기면 즉시 가능 → 결과를 시계 자리로.
+    // (canCompress는 tier/색만 보므로 res로 검사 가능 — 실제 코어 생성은 스왑 후)
+    if (res.tier === 2) {
+      const defOther = (matPos === cwOf(basePos)) ? ccwOf(basePos) : cwOf(basePos); // basePos의 비어있지 않을 이웃
+      const canDefault = !!canCompress(res, arr[defOther]);
+      if (!canDefault) {
+        const altPos = matPos; // 결과를 재료 자리로 이전
+        const altOther = (basePos === cwOf(altPos)) ? ccwOf(altPos) : cwOf(altPos);
+        const canAlt = !!canCompress(res, arr[altOther]);
+        if (canAlt) { const t = basePos; basePos = altPos; matPos = t; } // 자리 스왑(베이스=시계 쪽)
+      }
+    }
+
+    const baseCore = arr[basePos], matCore = arr[matPos];
+    let result;
+    if (res.tier === 2) {
+      // T1+T1 → 정의된 T2 (정의서 6.2, 조합 룩업). 베이스+재료 서브타입이 T2를 결정.
+      result = makeT2FromIds(baseCore.t1id, matCore.t1id);
+    } else {
+      // T2+T2 → T3 (정의서 6.3): 베이스 T2 형태 계승 + 파라미터 합산(색조합 10효과는 후속)
+      result = makeCore(3, res.colors, baseCore, matCore);
+    }
+
+    // 단계 기록(애니메이션): 재료 코어가 베이스 자리로 이동해 result로 합쳐짐
+    if (steps) steps.push({ basePos, matPos, baseCore, materialCore: matCore, result });
+
+    arr[basePos] = result;
+    arr[matPos] = null;
+    cur = basePos; // 연쇄: 결과 슬롯에서 재해소
+  }
+  return cur;
+}
+
+// 압축 단계 리스트를 계산 (arr를 최종 상태로 변형하며 steps 기록)
+function planCompression(arr, slot) {
+  const steps = [];
+  const resultSlot = resolveCompression(arr, slot, steps);
+  return { steps, resultSlot };
+}
+
+// 코어를 슬롯에 흡수 장착 후 압축 해소. (만석이면 덮어쓰기 — 정의서 3.3)
+//  arr를 직접 변형하고 events(압축 발생 여부 등)를 반환.
+function placeAndResolve(arr, slot, core) {
+  const before = arr.map(c => c ? c.tier : 0);
+  arr[slot] = core; // 빈 슬롯이면 장착, 찬 슬롯이면 덮어쓰기
+  const resultSlot = resolveCompression(arr, slot);
+  const compressed = arr[resultSlot] && (!before[resultSlot] || arr[resultSlot].tier > (core.tier));
+  return { resultSlot, compressed };
+}
+
+function cloneSlots(arr) { return arr.map(c => c ? { ...c } : null); }
+
+// ---- 적 정의 (정의서 10.1 / 10.4 일부) -----------------------------------
+const ENEMY = {
+  runner:  { cost: 2, hp: 6,  speed: 80, r: 11, color: '#39f4d0', kind: 'runner'  }, // 클럭 러너: 직진
+  bouncer: { cost: 2, hp: 5,  speed: 56, r: 11, color: '#39f4d0', kind: 'bouncer' }, // 핑 바운서: 외곽 공전(차단벽)
+  shooter: { cost: 3, hp: 5,  speed: 30, r: 12, color: '#ff5d54', kind: 'shooter' }, // 비트 슈터: 단발 저격
+  shielder:{ cost: 5, hp: 28, speed: 24, r: 18, color: '#cdd6df', kind: 'shielder'}, // 정크 실더: 고체력 방벽 → 정렬 연습 표적
+};
+// 웨이브 예산 곡선(섹터1 근사, 정의서 11.2)
+const WAVE_BUDGET = [4, 6, 8, 9, 11, 12, 13, 15, 16, 18, 20, 22];
+
+//============================================================================
+// 게임 상태
+//============================================================================
+let G;
+let MAXSLOTS = 6;        // 아웃게임 해금 슬롯 수(3~6). 런 시작 시 고정 (정의서 9.4① 모델)
+function newGame() {
+  // 시작 코어 1개를 1번 슬롯에 (정의서 3.0) — 순수 직선형 4종 중 무작위
+  const startId = START_T1[(Math.random() * START_T1.length) | 0];
+  const slots = [makeT1Id(startId), null, null, null, null, null];
+  G = {
+    t: 0,
+    hp: 100,
+    dir: 1,              // 회전 방향 (+1 시계, -1 반시계)
+    phase: 'combat',     // 'combat' | 'orbit' (정비 궤도)
+    slots,               // 6슬롯 (코어 또는 null)
+    maxSlots: MAXSLOTS,  // 해금된 슬롯 수 (그 이상은 잠김)
+    rot: 0,              // 슬롯 기준 각도
+    braking: false,
+    brakeTime: 0,        // 연속 홀드 시간
+    releaseGrace: 0,     // 0.5초 이내 재홀드면 단계 유지(정의서)
+    nova: 0,             // 노바 게이지 0~1
+    iframe: 0,
+    slotTimers: new Array(CFG.slotCount).fill(0),
+    bullets: [],
+    ebullets: [],
+    enemies: [],
+    warnings: [],        // 스폰 예고 글로우
+    particles: [],
+    puddles: [],         // 에어리어 장판 (area 코어)
+    shock: null,         // 노바 충격파
+    wave: 0,
+    waveActive: false,
+    waveBudgetLeft: 0,
+    spawnTimer: 0,
+    interWave: 1.2,      // 웨이브 사이 정비 텀
+    flash: 0,            // 피격 플래시
+    dead: false,
+    shake: 0,
+    score: 0,
+    novaCount: 0,
+    // 정비 궤도 상태 (2단계 이산 선택)
+    candidates: [],      // 공전 후보 코어들
+    orbitStep: 'cand',   // 'cand' | 'slot'(코어 배치) | 'boost'(스탯 강화 대상)
+    selCandIdx: 0,       // 선택 중인 후보 인덱스
+    selSlotIdx: 0,       // 선택 중인 대상 슬롯
+    pickedCore: null,    // 1단계에서 확정한 후보 코어(유형A)
+    pickedBoost: null,   // 1단계에서 확정한 스탯 강화(유형B)
+    holdT: 0,            // 꾹 진행 시간(확정 링)
+    holdConsumed: false, // 이번 누름이 확정으로 소비됐는지
+    orbitEnterT: 0,      // 정비 궤도 진입 시각 (이월 누름 무시용)
+    flyIn: null,         // 흡수 애니메이션
+    lastResultSlot: -1,  // 마지막 합성 결과 슬롯(연출용)
+    mergeFx: null,       // 압축 폭발 연출 {slot, color, tier, t, dur}
+    hitStop: 0,          // 히트스톱(역체감) 잔여 시간 — 압축 순간 짜릿함(정의서 12)
+    mergeQueue: [],      // 남은 압축 단계들 (순차 재생)
+    mergeStep: null,     // 현재 재생 중인 압축 단계 {step, phase, t}
+    merging: false,      // 압축 시퀀스 진행 중(큐가 빌 때까지) — 끝나면 finishMerge
+    // 코어 시험장
+    bench: false,        // 시험장 모드 on/off
+    benchIdx: 0,         // 장착 중인 T1 코어 인덱스(0~7)
+    benchSpawnT: 0,      // 더미 적 스폰 타이머
+  };
+  startWave(1);
+}
+
+// 시험장: 선택한 T1 코어를 6슬롯에 모두 장착
+function benchEquip() {
+  G.slots = [0,1,2,3,4,5].map(() => makeT1(T1_CORES[G.benchIdx]));
+  G.phase = 'combat'; G.merging = false; G.flyIn = null; G.candidates = [];
+}
+function enterBench() {
+  G.bench = true; G.phase = 'combat'; G.waveActive = false; G.merging = false;
+  G.enemies.length = 0; G.bullets.length = 0; G.ebullets.length = 0; G.warnings.length = 0; G.puddles.length = 0;
+  G.hp = 100; G.dead = false; G.benchSpawnT = 0;
+  benchEquip();
+}
+function exitBench() { G.bench = false; newGame(); }
+
+function startWave(n) {
+  G.wave = n;
+  const budget = WAVE_BUDGET[Math.min(n - 1, WAVE_BUDGET.length - 1)] + Math.max(0, n - WAVE_BUDGET.length) * 3;
+  G.waveBudgetLeft = budget;
+  G.waveActive = true;
+  G.spawnTimer = 0.3;
+}
+
+//============================================================================
+// 정비 궤도 (코어 획득·합성) — 정의서 3.1~3.5
+//============================================================================
+function enterOrbit() {
+  G.phase = 'orbit';
+  G.braking = false; G.brakeTime = 0; G.flyIn = null;
+  G.orbitStep = 'cand'; G.selCandIdx = 0; G.selSlotIdx = 0; G.pickedCore = null; G.pickedBoost = null;
+  G.holdT = 0; G.holdConsumed = false;
+  G.orbitEnterT = G.t; // 진입 시각 — 이후 새로 시작한 누름만 확정 인정(전투 브레이크 이월 방지)
+  rollCandidates();
+}
+
+// 흡수 가능한 슬롯 목록: 빈 슬롯(정의서 3.3). 만석이면 전 슬롯(덮어쓰기).
+// 해금된 슬롯 중 빈 슬롯. 만석이면 전 해금 슬롯.
+function eligibleSlots() {
+  const empties = [], all = [];
+  for (let i = 0; i < 6; i++) if (isUnlocked(i)) { all.push(i); if (!G.slots[i]) empties.push(i); }
+  return empties.length ? empties : all;
+}
+
+// 유형B 스탯 오버클록 종류 (정의서 3.5/4장 6대 스탯 중)
+const BOOSTS = [
+  { stat: 'dmg', name: '화력↑', apply: c => { c.dmg *= 1.4; } },
+  { stat: 'interval', name: '연사↑', apply: c => { c.interval *= 0.78; } },
+  { stat: 'bulletR', name: '크기↑', apply: c => { c.bulletR *= 1.35; } },
+  { stat: 'strands', name: '투사체+1', apply: c => { c.strands += 1; c.spread = Math.max(c.spread, 0.16); } },
+];
+
+// 3선택 후보 생성. 유형A(완제품 코어) / 유형B(스탯 오버클록) 비율은 섹터별 (정의서 3.5).
+// 3.6: 주력색 가중, 다양성, 빈 슬롯 있으면 ≥1개는 코어(A) 보장.
+function rollCandidates() {
+  const cnt = {};
+  for (const c of G.slots) if (c) for (const col of c.colors) cnt[col] = (cnt[col] || 0) + 1;
+  const major = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0];
+  const t2Chance = G.wave >= 11 ? 0.4 : G.wave >= 5 ? 0.2 : 0.05;
+  const bChance = G.wave >= 21 ? 0.6 : G.wave >= 11 ? 0.45 : 0.20; // A/B 비율(섹터1 80:20→섹터3 40:60)
+  const hasEmpty = eligibleSlots().some(i => !G.slots[i]);
+  const hasCore = G.slots.some(c => c);
+  const mkCore = (i) => {
+    let col = (i === 0 && major && Math.random() < 0.6) ? major : ATTR_KEYS[(Math.random() * ATTR_KEYS.length) | 0];
+    if (Math.random() < t2Chance) return { core: makeT2OfColor(col) };
+    const ids = T1_BY_COLOR[col]; return { core: makeT1Id(ids[(Math.random() * ids.length) | 0]) };
+  };
+  const picks = [];
+  for (let i = 0; i < 3; i++) {
+    if (hasCore && Math.random() < bChance) picks.push({ boost: BOOSTS[(Math.random() * BOOSTS.length) | 0] });
+    else picks.push(mkCore(i));
+  }
+  // 빈 슬롯 있는데 전부 B면 하나를 코어로 (3.6 ④)
+  if (hasEmpty && picks.every(p => p.boost)) picks[0] = mkCore(0);
+  const base = rand(0, TAU);
+  G.candidates = picks.map((p, i) => ({
+    core: p.core || null, boost: p.boost || null,
+    ang: base + i / 3 * TAU, r: CFG.candidateR, taken: false, bob: rand(0, TAU),
+  }));
+}
+
+// 스탯 강화 대상(=장착된 해금 슬롯)
+function boostableSlots() {
+  const out = [];
+  for (let i = 0; i < 6; i++) if (isUnlocked(i) && G.slots[i]) out.push(i);
+  return out;
+}
+// 현재 단계의 대상 슬롯 리스트 (slot=빈슬롯 흡수 / boost=장착코어 강화)
+function stepSlots() { return G.orbitStep === 'boost' ? boostableSlots() : eligibleSlots(); }
+
+// --- 2단계 이산 선택 (탁=다음 항목, 꾹=확정) ---
+function orbitTap() {
+  if (G.flyIn || G.merging) return;
+  if (G.orbitStep === 'cand') {
+    G.selCandIdx = (G.selCandIdx + 1) % G.candidates.length;
+  } else {
+    const list = stepSlots();
+    G.selSlotIdx = (G.selSlotIdx + 1) % list.length;
+  }
+  spawnRipple(CX, CY, '#7fe9ff', 18);
+}
+
+function orbitConfirm() {
+  if (G.flyIn || G.merging) return;
+  if (G.orbitStep === 'cand') {
+    const cand = G.candidates[G.selCandIdx];
+    if (cand.boost) {
+      // 유형B: 스탯 오버클록 → 대상 코어 선택 단계로
+      G.pickedBoost = cand.boost; G.pickedCore = null;
+      G.orbitStep = 'boost'; G.selSlotIdx = 0;
+    } else {
+      // 유형A: 코어 → 대상 빈 슬롯 선택. 합성되는 슬롯 우선 제안.
+      G.pickedCore = cand.core; G.pickedBoost = null;
+      G.orbitStep = 'slot';
+      const elig = eligibleSlots(); G.selSlotIdx = 0;
+      for (let k = 0; k < elig.length; k++) {
+        const sim = cloneSlots(G.slots);
+        if (placeAndResolve(sim, elig[k], { ...G.pickedCore }).compressed) { G.selSlotIdx = k; break; }
+      }
+    }
+    spawnRipple(CX, CY, '#ffe08a', 26);
+  } else if (G.orbitStep === 'boost') {
+    // 스탯 강화 확정 → 대상 코어에 적용 후 종료
+    const slot = boostableSlots()[G.selSlotIdx];
+    if (slot != null && G.slots[slot]) {
+      G.pickedBoost.apply(G.slots[slot]);
+      G.lastResultSlot = slot; G.mergeFx = { slot, color: G.slots[slot].color, tier: 0, t: 0, dur: 0.4 };
+      const a = slotAngle(slot);
+      spawnRipple(CX + Math.cos(a) * CFG.orbitR, CY + Math.sin(a) * CFG.orbitR, '#ffe08a', 30);
+    }
+    finishMerge(); // 정비 궤도 종료 → 다음 웨이브
+  } else {
+    // 슬롯 확정 → 사격선 타고 역흡수 애니메이션
+    const slot = eligibleSlots()[G.selSlotIdx];
+    const cand = G.candidates[G.selCandIdx];
+    const a = slotAngle(slot);
+    G.flyIn = { core: G.pickedCore, slot,
+      fromX: CX + Math.cos(cand.ang) * cand.r, fromY: CY + Math.sin(cand.ang) * cand.r,
+      toX: CX + Math.cos(a) * CFG.orbitR, toY: CY + Math.sin(a) * CFG.orbitR, t: 0, dur: 0.3 };
+  }
+}
+
+// flyIn 완료 → 코어 장착 후, 압축 단계를 큐로 순차 재생(눈에 보이게)
+function finishAbsorb() {
+  const f = G.flyIn; G.flyIn = null;
+  G.candidates = []; // 나머지 후보 정리
+  G.slots[f.slot] = f.core; // 흡수한 코어 장착(빈칸/덮어쓰기)
+  // 압축 단계 계획 (clone으로 계산 → G.slots는 단계별로 적용)
+  const clone = cloneSlots(G.slots);
+  const plan = planCompression(clone, f.slot);
+  if (!plan.steps.length) {
+    // 압축 없음 — 가벼운 장착 연출 후 종료
+    G.lastResultSlot = f.slot;
+    const a = slotAngle(f.slot);
+    spawnRipple(CX + Math.cos(a) * CFG.orbitR, CY + Math.sin(a) * CFG.orbitR, f.core.color, 18);
+    finishMerge();
+  } else {
+    G.mergeQueue = plan.steps;
+    G.mergeStep = null;
+    G.merging = true; // 큐가 빌 때까지 updateMerge가 계속 돌아 finishMerge로 종료
+  }
+}
+
+// 한 압축 단계 적용 + 폭발 연출
+function applyMergeStep(step) {
+  G.slots[step.basePos] = step.result;
+  G.slots[step.matPos] = null;
+  G.lastResultSlot = step.basePos;
+  const tier = step.result.tier;
+  const a = slotAngle(step.basePos);
+  const px = CX + Math.cos(a) * CFG.orbitR, py = CY + Math.sin(a) * CFG.orbitR;
+  G.hitStop = 0.06 + tier * 0.02;
+  G.shake = Math.max(G.shake, 4 + tier * 2.5);
+  G.mergeFx = { slot: step.basePos, color: step.result.color, tier, t: 0, dur: 0.5 };
+  spawnRipple(px, py, step.result.color, 24 + tier * 14);
+  spawnRipple(px, py, '#ffffff', 14 + tier * 8);
+  const n = 7 + tier * 8;
+  for (let i = 0; i < n; i++) {
+    const ang = rand(0, TAU), sp = rand(80, 180) * (0.7 + tier * 0.35);
+    G.particles.push({ x: px, y: py, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+      life: rand(.3, .6), max: .6, color: i % 3 ? step.result.color : '#ffffff', r: rand(1.5, 2.5 + tier * 0.6) });
+  }
+}
+
+// 압축 큐 순차 재생: slide(재료 이동) → pop(합체 폭발) → pause(텀)
+function updateMerge(dt) {
+  if (!G.mergeStep) {
+    if (!G.mergeQueue.length) { finishMerge(); return; }
+    G.mergeStep = { step: G.mergeQueue.shift(), phase: 'slide', t: 0 };
+    return;
+  }
+  const ms = G.mergeStep; ms.t += dt;
+  if (ms.phase === 'slide') {
+    if (ms.t >= CFG.mergeSlide) { applyMergeStep(ms.step); ms.phase = 'pause'; ms.t = 0; }
+  } else { // pause
+    if (ms.t >= CFG.mergePause) G.mergeStep = null;
+  }
+}
+
+// 모든 압축 종료 → 다음 웨이브 (정의서: 일반 궤도는 3선택 중 1개)
+function finishMerge() {
+  G.mergeQueue = []; G.mergeStep = null; G.merging = false; G.candidates = [];
+  G.phase = 'combat';
+  G.hp = clamp(G.hp + CFG.hpRecoverWaveClear, 0, 100); // 웨이브 클리어 회복(정의서 2.1)
+  G.interWave = 0.8;
+  G.waveActive = false;
+}
+
+// 정비 궤도 매 프레임: flyIn → 압축 큐 → (대기 시) 후보 선택 입력
+function updateOrbit(dt) {
+  for (const c of G.candidates) c.bob += dt * 3;
+  if (G.flyIn) {
+    G.flyIn.t += dt;
+    if (G.flyIn.t >= G.flyIn.dur) finishAbsorb();
+    return;
+  }
+  if (G.merging) { updateMerge(dt); return; }
+  // 꾹 진행: orbitHold 도달 시 1회 확정. 단 '정비 궤도 진입 후 새로 시작한 누름'만 인정
+  // (전투 중 브레이크를 누른 채 진입한 이월 누름은 무시 — 즉시 자동선택 방지)
+  const freshPress = pressing && pressStart >= G.orbitEnterT;
+  if (freshPress) {
+    G.holdT = G.t - pressStart;
+    if (G.holdT >= CFG.orbitHold && !G.holdConsumed) { orbitConfirm(); G.holdConsumed = true; }
+  } else {
+    G.holdT = 0;
+  }
+}
+
+//============================================================================
+// 입력 — 단일 터치/클릭 (탁=짧게, 꾹=홀드)
+//============================================================================
+const TAP_MAX = 0.18;    // 이 시간 이하로 떼면 '탁'(반전), 넘으면 '꾹'으로 간주
+let pressing = false, pressStart = 0, pressMoved = false, didBrake = false;
+
+function pressDown() {
+  if (G.dead) return;
+  pressing = true; pressStart = G.t; didBrake = false;
+}
+function pressUp() {
+  if (!pressing) return;
+  pressing = false;
+  const held = G.t - pressStart;
+  if (G.dead) return;
+  // --- 정비 궤도: 이산 선택 (탁=다음 항목, 꾹=확정은 update에서 처리됨) ---
+  if (G.phase === 'orbit') {
+    // 진입 후 새로 시작한 누름만 탁으로 인정(이월 누름 무시)
+    if (!G.holdConsumed && held < CFG.orbitHold && pressStart >= G.orbitEnterT) orbitTap();
+    G.holdConsumed = false; G.holdT = 0;
+    return;
+  }
+  // --- 전투: 탁(반전) / 브레이크 해제 ---
+  if (held < TAP_MAX && !didBrake) {
+    G.dir *= -1;
+    spawnRipple(CX, CY, '#7fe9ff', 26);
+  }
+  if (G.braking) releaseBrake();
+}
+function releaseBrake() {
+  // 노바가 가득 찼으면 떼는 순간 방출 (정의서 7)
+  if (G.nova >= 1) fireNova();
+  G.releaseGrace = 0.5; // 0.5초 유예: 이 안에 다시 누르면 과열 단계 유지
+  G.braking = false;
+}
+
+// 마우스
+cv.addEventListener('mousedown', e => { e.preventDefault(); pressDown(); });
+window.addEventListener('mouseup', e => { pressUp(); });
+// 터치
+cv.addEventListener('touchstart', e => { e.preventDefault(); pressDown(); }, { passive: false });
+window.addEventListener('touchend', e => { e.preventDefault(); pressUp(); }, { passive: false });
+window.addEventListener('touchcancel', e => { pressUp(); });
+// 키보드 (스페이스 = 누름, R 재시작, H 안내)
+let spaceDown = false;
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !spaceDown) { spaceDown = true; pressDown(); e.preventDefault(); }
+  else if (e.code === 'KeyR') { newGame(); }
+  else if (e.code === 'KeyH') { help.classList.toggle('hidden'); }
+  // [테스트용] Enter = 현재 웨이브 즉시 정리하고 정비 궤도(합성) 진입
+  else if (e.code === 'Enter') {
+    if (G.phase === 'combat' && !G.dead) {
+      G.enemies.length = 0; G.ebullets.length = 0; G.warnings.length = 0; G.waveBudgetLeft = 0;
+      enterOrbit();
+    }
+  }
+  // [테스트용] C = 정비 궤도에서 후보 3개 다시 뽑기(원하는 색 세팅)
+  else if (e.code === 'KeyC') { if (G.phase === 'orbit' && !G.flyIn) rollCandidates(); }
+  // [코어 시험장] B = 토글, 1~8 = T1 코어 장착, [ ] = 이전/다음 코어
+  else if (e.code === 'KeyB') { if (G.bench) exitBench(); else enterBench(); }
+  else if (G.bench && /^Digit[1-8]$/.test(e.code)) { G.benchIdx = (+e.code.slice(-1)) - 1; benchEquip(); }
+  else if (G.bench && e.code === 'BracketLeft')  { G.benchIdx = (G.benchIdx + 7) % 8; benchEquip(); }
+  else if (G.bench && e.code === 'BracketRight') { G.benchIdx = (G.benchIdx + 1) % 8; benchEquip(); }
+  // [테스트용] L = 해금 슬롯 수 3~6 순환 (아웃게임 슬롯 해금 시뮬레이션)
+  else if (e.code === 'KeyL') {
+    MAXSLOTS = MAXSLOTS >= 6 ? 3 : MAXSLOTS + 1;
+    G.maxSlots = MAXSLOTS;
+    for (let i = 0; i < 6; i++) if (!isUnlocked(i)) G.slots[i] = null; // 잠긴 슬롯 코어 제거
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space') { spaceDown = false; pressUp(); e.preventDefault(); }
+});
+
+//============================================================================
+// 노바
+//============================================================================
+function fireNova() {
+  G.shock = { r: 0, max: CFG.novaRadius, life: 1 };
+  G.nova = 0;
+  G.shake = 14;
+  G.novaCount++;
+  // 충격파 범위 내 잡몹 소멸 / 적탄 제거
+  for (const en of G.enemies) {
+    if (Math.hypot(en.x - CX, en.y - CY) < CFG.novaRadius) en.hp = -999;
+  }
+  G.ebullets.length = 0;
+  for (let i = 0; i < 60; i++) {
+    const a = rand(0, TAU);
+    G.particles.push({ x: CX, y: CY, vx: Math.cos(a) * rand(180, 520), vy: Math.sin(a) * rand(180, 520),
+      life: rand(.3, .7), max: .7, color: i % 2 ? '#ff6ad5' : '#7fe9ff', r: rand(2, 4) });
+  }
+}
+
+//============================================================================
+// 발사
+//============================================================================
+function slotAngle(i) { return G.rot + (i / CFG.slotCount) * TAU; }
+
+function fireSlot(i) {
+  const core = G.slots[i];
+  if (!core) return; // 빈 슬롯은 사격 못 함 (정의서 3.0)
+  const base = slotAngle(i);
+  const ox = CX + Math.cos(base) * CFG.orbitR;
+  const oy = CY + Math.sin(base) * CFG.orbitR;
+  const bh = core.behavior || 'straight';
+  // 가닥 수만큼 부채꼴로 동시 발사 (정의서 4장: 투사체 수 = 가닥 수)
+  for (let s = 0; s < core.strands; s++) {
+    const off = core.strands > 1 ? (s - (core.strands - 1) / 2) * core.spread : 0;
+    const a = base + off;
+    const bp = core.bparams || {};
+    // 빔(레이저)은 이동 안 하는 히트스캔 라인 — 별도 생성
+    if (bh === 'beam') {
+      G.bullets.push({ x: ox, y: oy, vx: 0, vy: 0, behavior: 'beam', color: core.color, combo: core.combo,
+        angle: a, range: bp.beamRange, width: bp.beamWidth, dmgps: bp.beamDmgps,
+        dotDps: bp.dotDps, dotTime: bp.dotTime, life: core.life, pierce: 0, dmg: 0 });
+      continue;
+    }
+    const b = { x: ox, y: oy, vx: Math.cos(a) * core.speed, vy: Math.sin(a) * core.speed,
+      life: core.life, r: core.bulletR, dmg: core.dmg, pierce: core.pierce, color: core.color, behavior: bh, combo: core.combo };
+    // 메커니즘별 추가 파라미터를 탄에 부여 (코어 bparams에서)
+    if (bh === 'dot') { b.dotDps = bp.dotDps; b.dotTime = bp.dotTime; }
+    else if (bh === 'area') { b.puddleR = bp.puddleR; b.puddleDps = bp.puddleDps; b.puddleTime = bp.puddleTime; }
+    else if (bh === 'pull') { b.pullForce = bp.pullForce; b.pullTime = bp.pullTime; }
+    else if (bh === 'delay') { b.dirX = Math.cos(a); b.dirY = Math.sin(a); b.spd = core.speed; b.age = 0;
+      b.pauseAt = bp.pauseAt; b.pauseFor = bp.pauseFor; b.accel = bp.accel; }
+    else if (bh === 'knockback') { b.knock = bp.knock; b.shed = bp.shed; }
+    else if (bh === 'fragment') { b.frags = bp.frags; b.fragSpeed = bp.fragSpeed; b.fragLife = bp.fragLife; b.fragDmg = bp.fragDmg; b.bounce = bp.bounce; }
+    else if (bh === 'burst') { b.burstFrags = bp.burstFrags; b.burstSpeed = bp.burstSpeed; b.burstSpread = bp.burstSpread; b.burstLife = bp.burstLife; b.burstDmg = bp.burstDmg; b.dirA = a; }
+    else if (bh === 'hold') { b.holdR = bp.holdR; b.holdForce = bp.holdForce; b.holdTime = bp.holdTime; b.holdDps = bp.holdDps; }
+    G.bullets.push(b);
+  }
+}
+
+function spawnRipple(x, y, color, r) {
+  G.particles.push({ ripple: true, x, y, r0: r * .3, r: r, life: .35, max: .35, color });
+}
+
+//============================================================================
+// 적 스폰 (360도 예고 → 본체)
+//============================================================================
+function rollSpawn() {
+  // 예산 안에서 무작위 적 선택
+  const pool = [];
+  if (G.waveBudgetLeft >= 2) pool.push(ENEMY.runner, ENEMY.bouncer);
+  if (G.waveBudgetLeft >= 3 && G.wave >= 2) pool.push(ENEMY.shooter);
+  if (G.waveBudgetLeft >= 5 && G.wave >= 3) pool.push(ENEMY.shielder);
+  if (!pool.length) return false;
+  const def = pool[(Math.random() * pool.length) | 0];
+  G.waveBudgetLeft -= def.cost;
+  const ang = rand(0, TAU);
+  // 예고 글로우 후 스폰
+  G.warnings.push({ ang, t: 0.7, def });
+  return true;
+}
+
+// 웨이브별 적 체력 배수 (정의서 11.2 TTK 곡선) — 초반 평평, 후반 급증
+// 섹터1(1~10): ×1.0 / 섹터2(11~20): ×1.05→1.65 / 섹터3(21~30): ×1.8→3.0
+function hpScale(w) {
+  if (w <= 10) return 1.0;
+  if (w <= 20) return 1.0 + (w - 10) * 0.065;   // w11=1.065 … w20=1.65
+  return 1.65 + (w - 20) * 0.15;                  // w21=1.80 … w29=3.0
+}
+
+function doSpawn(ang, def) {
+  const dist = Math.max(W, H) * 0.62;
+  const x = CX + Math.cos(ang) * dist;
+  const y = CY + Math.sin(ang) * dist;
+  const hp = Math.round(def.hp * hpScale(G.wave));
+  const e = { x, y, ang, hp, hpMax: hp, def, kind: def.kind, r: def.r, color: def.color,
+    orbitDir: Math.random() < .5 ? 1 : -1, fireT: rand(.8, 1.8), hit: 0 };
+  // 바운서는 목표 궤도 반경 지정
+  if (def.kind === 'bouncer') e.targetR = rand(170, 240);
+  G.enemies.push(e);
+}
+
+//============================================================================
+// 업데이트
+//============================================================================
+function update(dt) {
+  if (G.dead) return;
+  G.t += dt;
+
+  // 입력 → 브레이크 판정 (전투에서만): TAP_MAX 넘게 누르면 브레이크 진입
+  if (G.phase === 'combat' && pressing && (G.t - pressStart) >= TAP_MAX) {
+    if (!G.braking) {
+      G.braking = true; didBrake = true;
+      // 유예 안에 재진입이면 단계 유지, 아니면 초기화
+      if (G.releaseGrace <= 0) G.brakeTime = 0;
+    }
+  }
+  if (G.releaseGrace > 0) G.releaseGrace -= dt;
+
+  // 회전: 전투 중 브레이크 아닐 때만. 정비 궤도는 회전 정지(이산 선택).
+  if (G.phase === 'combat' && !G.braking) {
+    G.rot += G.dir * CFG.rotSpeed * dt;
+  } else if (G.braking && G.phase === 'combat' && !G.bench) {
+    // 브레이크 드레인 + 노바 충전 (정비 궤도·시험장에선 드레인 없음)
+    G.brakeTime += dt;
+    let rate = 5;
+    for (const [thr, r] of CFG.drainStages) { if (G.brakeTime <= thr) { rate = r; break; } }
+    G.hp -= rate * dt;
+    if (G.brakeTime >= CFG.novaChargeStart) {
+      G.nova = clamp(G.nova + dt / CFG.novaChargeTime, 0, 1);
+    }
+    if (G.hp <= 0) { G.hp = 0; die(); }
+  }
+  G.rot = norm(G.rot);
+
+  // 정비 궤도: 사격선 역흡수 처리 (정의서 3.2)
+  if (G.phase === 'orbit') updateOrbit(dt);
+
+  // 슬롯 자동 연사 — 전투 중에만 (정비 궤도는 사격 정지)
+  if (G.phase === 'combat') {
+    for (let i = 0; i < CFG.slotCount; i++) {
+      const core = G.slots[i];
+      if (!core) continue;
+      G.slotTimers[i] -= dt;
+      if (G.slotTimers[i] <= 0) {
+        fireSlot(i);
+        G.slotTimers[i] = core.interval * (G.braking ? CFG.brakeFireScale : 1);
+      }
+    }
+  }
+
+  // 타이머류
+  if (G.iframe > 0) G.iframe -= dt;
+  if (G.flash > 0) G.flash -= dt * 3;
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 40);
+  if (G.mergeFx) { G.mergeFx.t += dt; if (G.mergeFx.t >= G.mergeFx.dur) G.mergeFx = null; }
+
+  // 아군 탄
+  for (const b of G.bullets) {
+    if (b.behavior === 'beam') { b.life -= dt; continue; } // 빔: 이동X(히트스캔)
+    if (b.behavior === 'delay') {
+      // 허공 정지 후 가속 (마이그 변칙)
+      b.age += dt;
+      if (b.age >= b.pauseAt && b.age < b.pauseAt + b.pauseFor) {
+        // 정지 구간 (그 자리 hover)
+      } else {
+        if (b.age >= b.pauseAt + b.pauseFor) b.spd = Math.min(b.spd + b.accel * dt, 1500); // 스냅 가속
+        b.x += b.dirX * b.spd * dt; b.y += b.dirY * b.spd * dt;
+      }
+    } else {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+    }
+    b.life -= dt;
+    // 파편(프래그먼트 T2): 화면 가장자리에서 튕김 (벽 반사)
+    if (b.bounce > 0) {
+      if ((b.x < 0 && b.vx < 0) || (b.x > W && b.vx > 0)) { b.vx = -b.vx; b.bounce--; }
+      if ((b.y < 0 && b.vy < 0) || (b.y > H && b.vy > 0)) { b.vy = -b.vy; b.bounce--; }
+    }
+    // 인력 코어: 비행 중 주변 적을 끌어당김(맞기 전에도 보이는 효과)
+    if (b.behavior === 'pull') {
+      for (const e of G.enemies) {
+        if (e.hp <= 0) continue;
+        const ex = b.x - e.x, ey = b.y - e.y, d2 = ex * ex + ey * ey;
+        if (d2 < 13000 && d2 > 1) { const d = Math.sqrt(d2), f = (b.pullForce * 0.9) * (1 - d / 114) * dt; e.x += (ex / d) * f; e.y += (ey / d) * f; }
+      }
+    }
+  }
+
+  // 적 탄
+  for (const b of G.ebullets) { b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt; }
+
+  // 예고 → 스폰
+  for (const w of G.warnings) {
+    w.t -= dt;
+    if (w.t <= 0) { doSpawn(w.ang, w.def); w._done = true; }
+  }
+  G.warnings = G.warnings.filter(w => !w._done);
+
+  // 적 AI
+  for (const e of G.enemies) {
+    if (e.hit > 0) e.hit -= dt;
+    // 과열 지속피해(DOT) + 화염 파티클
+    if (e.burn && e.burn.time > 0) {
+      e.hp -= e.burn.dps * dt; e.burn.time -= dt;
+      if (Math.sin(G.t * 60 + e.x) > 0.6) G.particles.push({ x: e.x + rand(-e.r, e.r), y: e.y + rand(-e.r, e.r), vx: rand(-20, 20), vy: rand(-90, -40), life: rand(.2, .4), max: .4, color: Math.random() < .5 ? '#ff5d54' : '#ffb04a', r: rand(1.5, 3) });
+      if (e.hp <= 0) { killEnemy(e); continue; }
+    }
+    // 넉백/인력 외력 (감쇠)
+    if (e.kvx || e.kvy) {
+      e.x += e.kvx * dt; e.y += e.kvy * dt;
+      e.kvx *= 0.86; e.kvy *= 0.86;
+      if (Math.abs(e.kvx) < 4 && Math.abs(e.kvy) < 4) { e.kvx = 0; e.kvy = 0; }
+    }
+    // T3 색조합 상태: vuln(장갑파괴) 해제 / held(홀딩·경직) 감쇠
+    if (e.vulnT > 0) { e.vulnT -= dt; if (e.vulnT <= 0) e.vuln = 1; }
+    if (e.held > 0) e.held -= dt;
+    const espd = e.def.speed * (e.held > 0 ? 0.2 : 1); // 홀딩 시 거의 정지
+    const dx = CX - e.x, dy = CY - e.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const toC = Math.atan2(dy, dx);
+    if (e.kind === 'runner' || e.kind === 'shielder') {
+      e.x += (dx / d) * espd * dt;
+      e.y += (dy / d) * espd * dt;
+    } else if (e.kind === 'bouncer') {
+      if (d > e.targetR) { // 궤도까지 접근
+        e.x += (dx / d) * espd * dt;
+        e.y += (dy / d) * espd * dt;
+      } else { // 천천히 공전하며 끝까지 나선 진입 (바닥 없음 → 안 죽으면 충돌로 resolve)
+        const a = Math.atan2(e.y - CY, e.x - CX) + e.orbitDir * 0.45 * dt;
+        const rr = d - 20 * dt;
+        e.x = CX + Math.cos(a) * rr; e.y = CY + Math.sin(a) * rr;
+      }
+    } else if (e.kind === 'shooter') {
+      if (d > 260) { e.x += (dx / d) * espd * dt; e.y += (dy / d) * espd * dt; }
+      e.fireT -= dt;
+      if (e.fireT <= 0) {
+        e.fireT = rand(1.6, 2.6);
+        // 읽기 쉽게 조금 느리고 큰 단발탄 → 브레이크 정렬로 요격 가능한 창 확보
+        G.ebullets.push({ x: e.x, y: e.y, vx: Math.cos(toC) * 205, vy: Math.sin(toC) * 205, life: 5, r: 6 });
+      }
+    }
+  }
+
+  // 장판/중력장(area·hold 코어) — 범위 내 적에 지속피해 + (hold면 중앙으로 끌어 묶음)
+  for (const pd of G.puddles) {
+    pd.life -= dt;
+    for (const e of G.enemies) {
+      if (e.hp <= 0) continue;
+      if (pd.pull) { // 중력장: 항상 중앙으로 당김(필드 안이면 강하게)
+        const ex = pd.x - e.x, ey = pd.y - e.y, d2 = ex * ex + ey * ey;
+        if (d2 < (pd.r + 60) ** 2 && d2 > 1) { const d = Math.sqrt(d2); const f = pd.pull * dt; e.x += (ex / d) * f; e.y += (ey / d) * f; }
+      }
+      if ((e.x - pd.x) ** 2 + (e.y - pd.y) ** 2 < (pd.r + e.r) ** 2) {
+        e.hp -= pd.dps * dt; e.hit = 0.08;
+        if (e.hp <= 0) killEnemy(e);
+      }
+    }
+  }
+  G.puddles = G.puddles.filter(p => p.life > 0);
+
+  collide(dt);
+
+  // 충격파
+  if (G.shock) {
+    G.shock.r += 1100 * dt;
+    G.shock.life -= dt * 1.4;
+    if (G.shock.life <= 0) G.shock = null;
+  }
+
+  // 파티클
+  for (const p of G.particles) {
+    p.life -= dt;
+    if (!p.ripple) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; }
+  }
+  G.particles = G.particles.filter(p => p.life > 0);
+
+  // 사거리 끝(명중 없이) 처리: area=장판 / burst=산탄 폭발 / hold=중력장
+  for (const b of G.bullets) {
+    if (b.life > 0 || b._done) continue;
+    if (b.behavior === 'area') { spawnPuddle(b.x, b.y, b.puddleR, b.puddleDps, b.puddleTime, b.color); b._done = true; }
+    else if (b.behavior === 'burst') { burstScatter(b); b._done = true; }
+    else if (b.behavior === 'hold') { spawnHoldField(b); b._done = true; }
+  }
+  // 정리
+  G.bullets = G.bullets.filter(b => b.life > 0 && b.x > -40 && b.x < W + 40 && b.y > -40 && b.y < H + 40);
+  G.ebullets = G.ebullets.filter(b => b.life > 0);
+  G.enemies = G.enemies.filter(e => e.hp > 0);
+
+  // 코어 시험장: 더미 적을 꾸준히 스폰 (웨이브/정비 궤도 비활성)
+  if (G.bench) {
+    G.benchSpawnT -= dt;
+    if (G.benchSpawnT <= 0 && G.enemies.length < 10) {
+      G.benchSpawnT = 0.7;
+      doSpawn(rand(0, TAU), ENEMY.runner);
+    }
+    return; // 시험장은 웨이브 진행 안 함
+  }
+
+  // 웨이브 진행 (전투 페이즈에서만; 정비 궤도는 흡수로 종료)
+  if (G.phase === 'combat') {
+    if (G.waveActive) {
+      if (G.waveBudgetLeft > 0) {
+        G.spawnTimer -= dt;
+        if (G.spawnTimer <= 0) {
+          rollSpawn();
+          G.spawnTimer = rand(0.5, 1.1) - Math.min(0.3, G.wave * 0.02);
+        }
+      } else if (G.enemies.length === 0 && G.warnings.length === 0) {
+        // 웨이브 클리어 → 정비 궤도(코어 획득·합성) 진입 (정의서 3.1)
+        enterOrbit();
+      }
+    } else {
+      G.interWave -= dt;
+      if (G.interWave <= 0) startWave(G.wave + 1);
+    }
+  }
+}
+
+function spawnPuddle(x, y, r, dps, time, color) {
+  G.puddles.push({ x, y, r, dps, life: time, max: time, color });
+}
+// 색조합 효과: 광역 폭발 (코드과부하·마그네틱임팩트)
+function comboExplode(x, y, color, r, dmg) {
+  spawnRipple(x, y, color, r); spawnRipple(x, y, '#fff', r * 0.6);
+  for (const e of G.enemies) { if (e.hp <= 0) continue; if ((e.x - x) ** 2 + (e.y - y) ** 2 < r * r) { e.hp -= dmg * (e.vuln || 1); e.hit = 0.12; if (e.hp <= 0) killEnemy(e); } }
+  for (let i = 0; i < 12; i++) { const a = rand(0, TAU), sp = rand(120, 300); G.particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: rand(.25, .45), max: .45, color: i % 2 ? color : '#fff', r: rand(1.5, 3) }); }
+}
+// 색조합 효과: 인력 장판 (디아블로코어) — 근처 기존 장판 있으면 갱신(무한 스택 방지)
+function comboHoldPuddle(x, y, color) {
+  for (const pd of G.puddles) { if (pd.hold && (pd.x - x) ** 2 + (pd.y - y) ** 2 < 44 * 44) { pd.life = Math.max(pd.life, 1.0); return; } }
+  G.puddles.push({ x, y, r: 30, dps: 2.5, life: 1.0, max: 1.0, color, pull: 130, hold: true });
+}
+// 색조합 효과: 베이스 소형 복사본 분출 (버퍼분열) — 전방 부채꼴(유도 아님: 컨셉상 조준스킬 보존)
+function comboMiniCopies(b, n) {
+  const base = Math.atan2(b.vy, b.vx);
+  for (let i = 0; i < n; i++) { const a = base + (i - (n - 1) / 2) * 0.5; G.bullets.push({ x: b.x, y: b.y, vx: Math.cos(a) * 420, vy: Math.sin(a) * 420, life: 0.35, r: 3, dmg: (b.dmg || 1) * 0.5, pierce: 0, color: b.color, behavior: 'straight' }); }
+}
+function spawnFragments(x, y, b) {
+  for (let i = 0; i < b.frags; i++) {
+    const a = (i / b.frags) * TAU + rand(-0.25, 0.25);
+    G.bullets.push({ x, y, vx: Math.cos(a) * b.fragSpeed, vy: Math.sin(a) * b.fragSpeed,
+      life: b.fragLife, r: 3, dmg: b.fragDmg, pierce: 0, color: b.color, behavior: 'straight', bounce: b.bounce || 0 });
+  }
+}
+// 버스트 샷: 진행 방향 앞쪽으로 산탄 폭발 (스트림=직선 + 스캐터=산탄)
+function burstScatter(b) {
+  spawnRipple(b.x, b.y, b.color, 18);
+  const base = b.dirA != null ? b.dirA : Math.atan2(b.vy, b.vx);
+  for (let i = 0; i < b.burstFrags; i++) {
+    const a = base + (i / (b.burstFrags - 1) - 0.5) * b.burstSpread;
+    G.bullets.push({ x: b.x, y: b.y, vx: Math.cos(a) * b.burstSpeed, vy: Math.sin(a) * b.burstSpeed,
+      life: b.burstLife, r: 3.5, dmg: b.burstDmg, pierce: 0, color: b.color, behavior: 'straight' });
+  }
+}
+// 중력 궤도: 착탄 지점에 중력장 필드 (끌어 묶음 + 지속피해)
+function spawnHoldField(b) {
+  G.puddles.push({ x: b.x, y: b.y, r: b.holdR, dps: b.holdDps, life: b.holdTime, max: b.holdTime, color: b.color, pull: b.holdForce, hold: true });
+  spawnRipple(b.x, b.y, b.color, 30);
+}
+// 명중 시 메커니즘별 효과 (정의서 6 코어 정체성)
+function applyHitBehavior(b, e) {
+  switch (b.behavior) {
+    case 'dot': e.burn = { dps: b.dotDps, time: b.dotTime }; break;
+    case 'knockback': { const a = Math.atan2(e.y - CY, e.x - CX); e.kvx = Math.cos(a) * b.knock; e.kvy = Math.sin(a) * b.knock;
+      if (b.shed) spawnFragments(b.x, b.y, { frags: b.shed, fragSpeed: 280, fragLife: 0.3, fragDmg: 0.6, color: b.color }); break; } // 철갑: 파편 흘림
+    case 'pull': { const a = Math.atan2(CY - e.y, CX - e.x); e.kvx = Math.cos(a) * b.pullForce; e.kvy = Math.sin(a) * b.pullForce; break; }
+    case 'area': spawnPuddle(b.x, b.y, b.puddleR, b.puddleDps, b.puddleTime, b.color); b._done = true; break;
+    case 'fragment': spawnFragments(b.x, b.y, b); break;
+    case 'burst': burstScatter(b); b._done = true; break;
+    case 'hold': spawnHoldField(b); b._done = true; break;
+  }
+}
+
+function collide(dt) {
+  // 빔(레이저) — 슬롯에서 뻗는 라인 위 적에 지속피해 + 과열 (히트스캔)
+  for (const b of G.bullets) {
+    if (b.behavior !== 'beam' || b.life <= 0) continue;
+    const dx = Math.cos(b.angle), dy = Math.sin(b.angle);
+    for (const e of G.enemies) {
+      if (e.hp <= 0) continue;
+      const rx = e.x - b.x, ry = e.y - b.y;
+      const proj = rx * dx + ry * dy;
+      if (proj < 0 || proj > b.range) continue;
+      if (Math.abs(rx * dy - ry * dx) < b.width + e.r) {
+        e.hp -= b.dmgps * dt * (e.vuln || 1); e.hit = 0.08;
+        if (b.dotDps) e.burn = { dps: b.dotDps, time: b.dotTime };
+        if (e.hp <= 0) killEnemy(e);
+      }
+    }
+  }
+  // 아군 탄 vs 적 (피해·관통은 코어 스탯, T3 색조합 효과 적용)
+  for (const b of G.bullets) {
+    if (b.life <= 0 || b.behavior === 'beam') continue;
+    for (const e of G.enemies) {
+      if (e.hp <= 0) continue;
+      if (b._hit === e) continue; // 같은 적 중복타 방지(관통)
+      if ((b.x - e.x) ** 2 + (b.y - e.y) ** 2 < (e.r + b.r) ** 2) {
+        e.hp -= (b.dmg || 1) * (e.vuln || 1); e.hit = 0.12; // vuln=열역학파쇄 등
+        spawnRipple(b.x, b.y, e.color, 12);
+        applyHitBehavior(b, e); // 거동별 효과(DOT/넉백/인력/장판/파편/버스트/홀드)
+        if (b.combo && COMBO_FX[b.combo] && COMBO_FX[b.combo].onHit) COMBO_FX[b.combo].onHit(b, e); // T3 색조합 효과
+        if (e.hp <= 0) killEnemy(e);
+        if ((b.pierce || 0) > 0) { b.pierce--; b._hit = e; } // 관통: 한 번 더 통과
+        else { b.life = -1; break; }
+      }
+    }
+  }
+  // 브레이크 사격 = 적 투사체 상쇄 (정의서 2.1) — 아군 탄이 적 탄과 부딪히면 둘 다 제거
+  for (const b of G.bullets) {
+    if (b.life <= 0 || b.behavior === 'beam') continue;
+    for (const eb of G.ebullets) {
+      if (eb.life <= 0) continue;
+      if ((b.x - eb.x) ** 2 + (b.y - eb.y) ** 2 < (eb.r + b.r + CFG.interceptPad) ** 2) {
+        eb.life = -1;
+        if (b.combo === 'purple+purple') { // 이벤트호라이즌: 적탄 흡수 → 광역 대미지(소멸 안 함)
+          comboExplode(eb.x, eb.y, b.color, 40, 2);
+        } else {
+          spawnRipple(eb.x, eb.y, '#ffae6a', 10);
+          if ((b.pierce || 0) > 0) b.pierce--; else { b.life = -1; }
+        }
+        break;
+      }
+    }
+  }
+  // 적 본체 vs 중앙 기체
+  for (const e of G.enemies) {
+    if (e.hp <= 0) continue;
+    if ((e.x - CX) ** 2 + (e.y - CY) ** 2 < (e.r + 26) ** 2) {
+      hitPlayer(e.kind === 'shooter' ? 4 : 7);
+      killEnemy(e); // 충돌 1회 피해 후 소멸 (정의서 2.3)
+    }
+  }
+  // 적 탄 vs 중앙 기체
+  for (const eb of G.ebullets) {
+    if (eb.life <= 0) continue;
+    if ((eb.x - CX) ** 2 + (eb.y - CY) ** 2 < (eb.r + 24) ** 2) {
+      hitPlayer(4); eb.life = -1;
+    }
+  }
+}
+
+function killEnemy(e) {
+  e.hp = -999;
+  G.score++;
+  for (let i = 0; i < 8; i++) {
+    const a = rand(0, TAU);
+    G.particles.push({ x: e.x, y: e.y, vx: Math.cos(a) * rand(60, 220), vy: Math.sin(a) * rand(60, 220),
+      life: rand(.25, .5), max: .5, color: e.color, r: rand(1.5, 3) });
+  }
+}
+
+function hitPlayer(dmg) {
+  if (G.bench) return; // 시험장은 무적(코어 손맛에 집중)
+  if (G.iframe > 0) return;
+  G.hp -= dmg;
+  G.iframe = CFG.iframe;
+  G.flash = 1;
+  G.shake = Math.max(G.shake, 8);
+  if (G.hp <= 0) { G.hp = 0; die(); }
+}
+
+function die() {
+  if (G.dead) return;
+  G.dead = true;
+  G.shake = 18;
+  for (let i = 0; i < 80; i++) {
+    const a = rand(0, TAU);
+    G.particles.push({ x: CX, y: CY, vx: Math.cos(a) * rand(80, 460), vy: Math.sin(a) * rand(80, 460),
+      life: rand(.4, 1), max: 1, color: i % 3 ? '#ff4d54' : '#5fd9c8', r: rand(2, 5) });
+  }
+}
+
+//============================================================================
+// 렌더
+//============================================================================
+// 메커니즘별 코어 실루엣 (색=속성, 형태=거동 → 같은 색이라도 한눈에 구분)
+function drawCoreShape(x, y, r, beh) {
+  ctx.beginPath();
+  switch (beh) {
+    case 'straight': // 삼각형(직진)
+      ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.92, y + r * 0.8); ctx.lineTo(x - r * 0.92, y + r * 0.8); ctx.closePath(); ctx.fill(); break;
+    case 'scatter': // 점 3개 부채꼴(산탄)
+      for (let k = -1; k <= 1; k++) { ctx.beginPath(); ctx.arc(x + k * r * 0.85, y + Math.abs(k) * r * 0.4 - r * 0.2, r * 0.42, 0, TAU); ctx.fill(); } break;
+    case 'dot': // 원 + 밝은 핵(불씨)
+      ctx.arc(x, y, r, 0, TAU); ctx.fill(); ctx.save(); ctx.fillStyle = '#fff'; ctx.globalAlpha *= 0.9; ctx.beginPath(); ctx.arc(x, y, r * 0.4, 0, TAU); ctx.fill(); ctx.restore(); break;
+    case 'area': // 굵은 고리(장판)
+      ctx.lineWidth = r * 0.5; ctx.arc(x, y, r * 0.75, 0, TAU); ctx.stroke(); break;
+    case 'pull': // 소용돌이 호(인력)
+      ctx.lineWidth = r * 0.45; ctx.arc(x, y, r * 0.8, 0.4, 0.4 + 4.7); ctx.stroke(); ctx.beginPath(); ctx.arc(x, y, r * 0.28, 0, TAU); ctx.fill(); break;
+    case 'delay': // 마름모(변칙)
+      ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.78, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r * 0.78, y); ctx.closePath(); ctx.fill(); break;
+    case 'knockback': // 사각(질량)
+      ctx.fillRect(x - r * 0.85, y - r * 0.85, r * 1.7, r * 1.7); break;
+    case 'fragment': { // 4각 별(파편)
+      const sp = r, dp = r * 0.4;
+      for (let k = 0; k < 8; k++) { const a = k / 8 * TAU - Math.PI / 2; const rr = k % 2 ? dp : sp; const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+      ctx.closePath(); ctx.fill(); break; }
+    case 'beam': // 세로 막대(빔)
+      ctx.fillRect(x - r * 0.32, y - r, r * 0.64, r * 2); break;
+    case 'burst': // 삼각형 + 앞쪽 산탄 점(직선+산탄 혈통)
+      ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.7, y + r * 0.3); ctx.lineTo(x - r * 0.7, y + r * 0.3); ctx.closePath(); ctx.fill();
+      for (let k = -1; k <= 1; k++) { ctx.beginPath(); ctx.arc(x + k * r * 0.55, y + r * 0.78, r * 0.24, 0, TAU); ctx.fill(); } break;
+    case 'hold': // 이중 고리(중력장)
+      ctx.lineWidth = r * 0.35; ctx.arc(x, y, r * 0.85, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, r * 0.42, 0, TAU); ctx.stroke(); break;
+    default:
+      ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  }
+}
+// 작은 위성 형태(혈통 표시용): 색 cc, 거동 beh
+function drawSatellite(x, y, r, beh, cc, al) {
+  ctx.save(); ctx.globalAlpha = al; ctx.fillStyle = cc; ctx.strokeStyle = cc; ctx.shadowColor = cc; ctx.shadowBlur = 6; ctx.lineWidth = 1.2;
+  drawCoreShape(x, y, r, beh); ctx.restore();
+}
+// 코어 글리프: 색=속성, 형태=거동, 티어=외형 단계(T1 단일 / T2 프레임+부모위성 / T3 아우라+부모위성)
+function drawCoreGlyph(x, y, core, alpha, scale) {
+  const al = alpha == null ? 1 : alpha;
+  const sc = scale == null ? 1 : scale;
+  const tier = core.tier;
+  const r = (5 + core.lw * 0.9 + (tier - 1) * 2.2) * sc; // 티어 클수록 큰 본체
+  const mainCol = tier === 3 ? ATTR[core.colors[0]].color : core.color;
+  ctx.save();
+  ctx.globalAlpha = al;
+  ctx.shadowColor = mainCol; ctx.shadowBlur = (10 + tier * 3) * sc;
+
+  // --- T3: 에픽 아우라 (회전 스파이크 + 외곽 링) ---
+  if (tier === 3) {
+    ctx.save();
+    ctx.strokeStyle = ATTR[core.colors[1]].color; ctx.shadowColor = ATTR[core.colors[1]].color; ctx.shadowBlur = 10 * sc;
+    ctx.globalAlpha = al * (0.45 + 0.35 * Math.abs(Math.sin(G.t * 4)));
+    ctx.lineWidth = 1.4 * sc;
+    const rot = G.t * 1.4;
+    for (let k = 0; k < 8; k++) { const a = rot + k / 8 * TAU; ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * r * 1.6, y + Math.sin(a) * r * 1.6); ctx.lineTo(x + Math.cos(a) * r * 2.15, y + Math.sin(a) * r * 2.15); ctx.stroke(); }
+    ctx.restore();
+    ctx.globalAlpha = al; ctx.strokeStyle = mainCol; ctx.lineWidth = 1.5 * sc;
+    ctx.beginPath(); ctx.arc(x, y, r * 1.5, 0, TAU); ctx.stroke();
+  }
+  // --- T2: 각진 육각 프레임 ---
+  else if (tier === 2) {
+    ctx.strokeStyle = mainCol; ctx.lineWidth = 1.3 * sc; ctx.globalAlpha = al * 0.85;
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) { const a = k / 6 * TAU - Math.PI / 2; const px = x + Math.cos(a) * r * 1.55, py = y + Math.sin(a) * r * 1.55; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.closePath(); ctx.stroke(); ctx.globalAlpha = al;
+  }
+
+  // --- 본체 형태 ---
+  ctx.fillStyle = mainCol; ctx.strokeStyle = mainCol; ctx.lineWidth = 2 * sc; ctx.shadowColor = mainCol;
+  drawCoreShape(x, y, r, core.behavior || 'straight');
+  if (tier === 3) { ctx.fillStyle = ATTR[core.colors[1]].color; ctx.beginPath(); ctx.arc(x, y, r * 0.4, 0, TAU); ctx.fill(); }
+
+  // --- 혈통 위성: 부모 두 코어의 형태를 하단 좌우에 작게 ---
+  let parents = null; // [{beh, col}, {beh, col}]
+  if (tier === 2 && core.parents) {
+    parents = core.parents.map(pid => ({ beh: (T1_BY_ID[pid] || {}).behavior || 'straight', col: mainCol }));
+  } else if (tier === 3 && core.parentBeh) {
+    parents = [{ beh: core.parentBeh[0], col: ATTR[core.colors[0]].color }, { beh: core.parentBeh[1], col: ATTR[core.colors[1]].color }];
+  }
+  if (parents) {
+    const pr = r * 0.45;
+    for (let p = 0; p < 2; p++) {
+      const a = Math.PI / 2 + (p === 0 ? -0.62 : 0.62); // 하단 좌우
+      drawSatellite(x + Math.cos(a) * r * 1.85, y + Math.sin(a) * r * 1.85, pr, parents[p].beh, parents[p].col, al * 0.9);
+    }
+  }
+  ctx.restore();
+}
+
+// 꾹(확정) 진행 링
+function drawHoldRing(x, y, r) {
+  if (!pressing || G.holdConsumed) return;
+  const p = clamp(G.holdT / CFG.orbitHold, 0, 1);
+  ctx.save(); ctx.strokeStyle = '#fff2b0'; ctx.lineWidth = 3;
+  ctx.shadowColor = '#fff2b0'; ctx.shadowBlur = 12;
+  ctx.beginPath(); ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + p * TAU); ctx.stroke(); ctx.restore();
+}
+
+// 유형B(스탯 오버클록) 후보 아이콘 — 골드 다이아 + ↑
+function drawBoostIcon(x, y, alpha, scale) {
+  const sc = scale == null ? 1 : scale, al = alpha == null ? 1 : alpha, r = 9 * sc;
+  ctx.save(); ctx.globalAlpha = al; ctx.strokeStyle = '#ffd66e'; ctx.fillStyle = '#ffd66e';
+  ctx.shadowColor = '#ffd66e'; ctx.shadowBlur = 12 * sc; ctx.lineWidth = 2 * sc;
+  ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y + r * 0.55); ctx.lineTo(x, y - r * 0.55);
+  ctx.moveTo(x - r * 0.45, y - r * 0.1); ctx.lineTo(x, y - r * 0.55); ctx.lineTo(x + r * 0.45, y - r * 0.1); ctx.stroke();
+  ctx.restore();
+}
+function drawCandidate(x, y, c, alpha, scale) {
+  if (c.core) drawCoreGlyph(x, y, c.core, alpha, scale);
+  else drawBoostIcon(x, y, alpha, scale);
+}
+
+// 정비 궤도 레이어: 2단계 이산 선택 (후보 → 슬롯/강화) + 고스트 프리뷰 + flyIn + 압축 슬라이드
+function renderOrbit() {
+  if (G.phase !== 'orbit') return;
+
+  // flyIn 중이면 흡수 애니만
+  if (G.flyIn) {
+    const f = G.flyIn, p = clamp(f.t / f.dur, 0, 1);
+    drawCoreGlyph(f.fromX + (f.toX - f.fromX) * p, f.fromY + (f.toY - f.fromY) * p, f.core, 1);
+    return;
+  }
+
+  // 압축 시퀀스 중(후보는 이미 비워짐) — 선택 UI 그리지 않음. mergeStep 있으면 슬라이드 표시.
+  if (G.merging) {
+    const ms = G.mergeStep;
+    if (ms && ms.phase === 'slide') {
+      const st = ms.step;
+      const p = clamp(ms.t / CFG.mergeSlide, 0, 1), e = p * p * (3 - 2 * p); // smoothstep
+      const ma = slotAngle(st.matPos), ba = slotAngle(st.basePos);
+      const mx = CX + Math.cos(ma) * CFG.orbitR, my = CY + Math.sin(ma) * CFG.orbitR;
+      const bx = CX + Math.cos(ba) * CFG.orbitR, by = CY + Math.sin(ba) * CFG.orbitR;
+      const x = mx + (bx - mx) * e, y = my + (by - my) * e;
+      // 이동 궤적 + 재료 글리프
+      ctx.save();
+      ctx.globalAlpha = 0.5; ctx.strokeStyle = st.materialCore.color; ctx.lineWidth = 2;
+      ctx.shadowColor = st.materialCore.color; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(x, y); ctx.stroke();
+      ctx.restore();
+      drawCoreGlyph(x, y, st.materialCore, 1);
+    }
+    return;
+  }
+
+  // 후보 공전 가이드 링
+  ctx.save();
+  ctx.globalAlpha = 0.12; ctx.strokeStyle = '#6fe8d6'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(CX, CY, CFG.candidateR, 0, TAU); ctx.stroke();
+  ctx.restore();
+
+  const candPos = c => { const bob = Math.sin(c.bob) * 4; return [CX + Math.cos(c.ang) * (c.r + bob), CY + Math.sin(c.ang) * (c.r + bob)]; };
+
+  const inSelect = G.orbitStep !== 'cand';
+
+  // --- 후보 그리기 (코어=글리프 / 스탯강화=골드 다이아) ---
+  for (let k = 0; k < G.candidates.length; k++) {
+    const c = G.candidates[k];
+    const [cx, cy] = candPos(c);
+    const dim = inSelect && k !== G.selCandIdx;
+    if (k === G.selCandIdx && !dim) {
+      ctx.save();
+      ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(G.t * 7));
+      ctx.strokeStyle = '#fff2b0'; ctx.lineWidth = 2.5; ctx.shadowColor = '#fff2b0'; ctx.shadowBlur = 16;
+      ctx.beginPath(); ctx.arc(cx, cy, 30 + 2 * Math.sin(G.t * 7), 0, TAU); ctx.stroke();
+      ctx.restore();
+      drawCandidate(cx, cy, c, 1, 1.8);
+    } else {
+      drawCandidate(cx, cy, c, dim ? 0.25 : 0.55, 1.5);
+    }
+  }
+
+  if (!inSelect) { // 1단계: 선택 후보에 꾹 진행 링
+    const [cx, cy] = candPos(G.candidates[G.selCandIdx]);
+    drawHoldRing(cx, cy, 22);
+    return;
+  }
+
+  // --- 2단계: 대상 슬롯(코어 배치) 또는 강화 대상 코어 선택 ---
+  const list = stepSlots();
+  const slot = list[G.selSlotIdx];
+  if (slot == null) return; // 대상 없음
+  const sa = slotAngle(slot), sx = CX + Math.cos(sa) * CFG.orbitR, sy = CY + Math.sin(sa) * CFG.orbitR;
+  const [cx, cy] = candPos(G.candidates[G.selCandIdx]);
+
+  // 후보 → 대상 라인
+  ctx.save();
+  ctx.strokeStyle = '#ffe08a'; ctx.lineWidth = 2; ctx.globalAlpha = 0.75;
+  ctx.shadowColor = '#ffe08a'; ctx.shadowBlur = 10; ctx.setLineDash([6, 5]);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(sx, sy); ctx.stroke();
+  ctx.restore();
+  // 대상 강조 링
+  ctx.save();
+  ctx.globalAlpha = 0.6 + 0.4 * Math.abs(Math.sin(G.t * 7));
+  ctx.strokeStyle = '#fff2b0'; ctx.lineWidth = 2.5; ctx.shadowColor = '#fff2b0'; ctx.shadowBlur = 14;
+  ctx.beginPath(); ctx.arc(sx, sy, 15, 0, TAU); ctx.stroke();
+  ctx.restore();
+
+  if (G.orbitStep === 'slot') {
+    // 합성 결과 고스트 (정의서 3.4)
+    const sim = cloneSlots(G.slots);
+    placeAndResolve(sim, slot, { ...G.pickedCore });
+    const ghostA = 0.4 + 0.3 * Math.abs(Math.sin(G.t * 6));
+    for (let i = 0; i < 6; i++) {
+      const bL = G.slots[i] ? G.slots[i].label : '', aL = sim[i] ? sim[i].label : '';
+      if (bL === aL) continue;
+      const aa = slotAngle(i), gx = CX + Math.cos(aa) * CFG.orbitR, gy = CY + Math.sin(aa) * CFG.orbitR;
+      if (sim[i]) drawCoreGlyph(gx, gy, sim[i], ghostA);
+      else { ctx.save(); ctx.globalAlpha = 0.55; ctx.strokeStyle = '#ff9a5a'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(gx, gy, 8, 0, TAU); ctx.stroke(); ctx.restore(); }
+    }
+  } else {
+    // 강화 대상 코어 위 ↑ 표식
+    ctx.save(); ctx.globalAlpha = 0.7 + 0.3 * Math.abs(Math.sin(G.t * 8)); ctx.strokeStyle = '#ffd66e'; ctx.lineWidth = 2.5; ctx.shadowColor = '#ffd66e'; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.moveTo(sx, sy + 9); ctx.lineTo(sx, sy - 9); ctx.moveTo(sx - 5, sy - 3); ctx.lineTo(sx, sy - 9); ctx.lineTo(sx + 5, sy - 3); ctx.stroke(); ctx.restore();
+  }
+  drawHoldRing(sx, sy, 15);
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+
+  // 화면 흔들림
+  ctx.save();
+  if (G.shake > 0) ctx.translate(rand(-G.shake, G.shake) * .5, rand(-G.shake, G.shake) * .5);
+
+  const hpFrac = G.hp / 100;
+
+  // --- 예고 글로우 (외곽 각도) ---
+  for (const w of G.warnings) {
+    const blink = 0.4 + 0.6 * Math.abs(Math.sin(G.t * 18));
+    const rr = Math.max(W, H) * 0.46;
+    const x = CX + Math.cos(w.ang) * rr, y = CY + Math.sin(w.ang) * rr;
+    ctx.save();
+    ctx.globalAlpha = blink * (w.t / 0.7) * 0.9 + 0.1;
+    ctx.fillStyle = w.def.color;
+    ctx.shadowColor = w.def.color; ctx.shadowBlur = 24;
+    ctx.beginPath(); ctx.arc(x, y, 14, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+
+  // --- 장판/중력장 (area·hold 코어) — 바닥 레이어 ---
+  for (const pd of G.puddles) {
+    const a = clamp(pd.life / pd.max, 0, 1);
+    const rr = pd.r * (0.6 + 0.4 * a);
+    ctx.save();
+    ctx.globalAlpha = 0.18 + 0.22 * a;
+    ctx.fillStyle = pd.color; ctx.shadowColor = pd.color; ctx.shadowBlur = 16;
+    ctx.beginPath(); ctx.arc(pd.x, pd.y, rr, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 0.55 * a; ctx.lineWidth = 1.5; ctx.strokeStyle = pd.color;
+    ctx.beginPath(); ctx.arc(pd.x, pd.y, rr, 0, TAU); ctx.stroke();
+    if (pd.hold) { // 중력장: 안쪽으로 빨려드는 회전 나선
+      ctx.globalAlpha = 0.6 * a; ctx.lineWidth = 2;
+      for (let k = 0; k < 3; k++) { const a0 = G.t * 3 + k / 3 * TAU; ctx.beginPath(); ctx.arc(pd.x, pd.y, rr * 0.55, a0, a0 + 2.2); ctx.stroke(); }
+    }
+    ctx.restore();
+  }
+
+  // --- 적 탄 ---
+  ctx.save(); ctx.shadowColor = '#ff7a54'; ctx.shadowBlur = 10;
+  ctx.fillStyle = '#ff8a5a';
+  for (const b of G.ebullets) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill(); }
+  ctx.restore();
+
+  // --- 적 ---
+  for (const e of G.enemies) {
+    ctx.save();
+    const c = e.hit > 0 ? '#ffffff' : e.color;
+    ctx.shadowColor = e.color; ctx.shadowBlur = 12;
+    ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.translate(e.x, e.y);
+    ctx.beginPath();
+    if (e.kind === 'runner') { // 삼각형
+      const a0 = Math.atan2(CY - e.y, CX - e.x);
+      for (let k = 0; k < 3; k++) { const a = a0 + k / 3 * TAU; const px = Math.cos(a) * e.r, py = Math.sin(a) * e.r; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+      ctx.closePath();
+    } else if (e.kind === 'bouncer') { // 마름모
+      ctx.moveTo(0, -e.r); ctx.lineTo(e.r, 0); ctx.lineTo(0, e.r); ctx.lineTo(-e.r, 0); ctx.closePath();
+    } else if (e.kind === 'shielder') { // 육각 방벽
+      ctx.lineWidth = 3;
+      for (let k = 0; k < 6; k++) { const a = k / 6 * TAU; const px = Math.cos(a) * e.r, py = Math.sin(a) * e.r; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+      ctx.closePath();
+    } else { // 사각 (슈터)
+      ctx.rect(-e.r, -e.r, e.r * 2, e.r * 2);
+    }
+    ctx.fill(); ctx.stroke();
+    // 피해 누적 시 내부 붉은 에러 코어 노출 (정의서 12) — HP가 숫자 없이 읽힌다
+    const dmgFrac = 1 - e.hp / e.hpMax;
+    if (dmgFrac > 0.02) {
+      ctx.fillStyle = '#ff3a44'; ctx.shadowColor = '#ff3a44'; ctx.shadowBlur = 10;
+      ctx.globalAlpha = 0.55 + 0.25 * Math.abs(Math.sin(G.t * 10));
+      ctx.beginPath(); ctx.arc(0, 0, e.r * 0.55 * dmgFrac, 0, TAU); ctx.fill();
+    }
+    if (e.vuln > 1) { // 열역학파쇄: 장갑 파괴 표식(흰 균열 링)
+      ctx.globalAlpha = 0.6 + 0.3 * Math.abs(Math.sin(G.t * 14)); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(0, 0, e.r + 3, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (e.held > 0) { // 홀딩: 보라 구속 링
+      ctx.globalAlpha = 0.6; ctx.strokeStyle = '#b97cff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, e.r + 5, G.t * 5, G.t * 5 + 4.5); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // --- 아군 탄 — 코어(메커니즘)별로 다른 모양 ---
+  ctx.save(); ctx.shadowBlur = 8;
+  for (const b of G.bullets) {
+    const col = b.color || '#bdf6ff';
+    ctx.fillStyle = col; ctx.strokeStyle = col; ctx.shadowColor = col;
+    const bh = b.behavior || 'straight';
+    if (bh === 'beam') {
+      // 레이저: 슬롯에서 뻗는 굵은 라인 + 코어 글로우
+      const ex = b.x + Math.cos(b.angle) * b.range, ey = b.y + Math.sin(b.angle) * b.range;
+      ctx.globalAlpha = 0.85; ctx.shadowBlur = 18; ctx.lineCap = 'round';
+      ctx.lineWidth = b.width * 1.6; ctx.globalAlpha = 0.3; ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.lineWidth = b.width * 0.7; ctx.globalAlpha = 0.95; ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.strokeStyle = col;
+    } else if (bh === 'burst') {
+      // 버스트 탄: 충전된 직선탄(앞쪽 짧은 꼬리)
+      ctx.globalAlpha = 1; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+      const sp = Math.hypot(b.vx, b.vy) || 1; ctx.globalAlpha = 0.5; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx / sp * 10, b.y - b.vy / sp * 10); ctx.stroke();
+    } else if (bh === 'hold') {
+      // 중력 탄: 작은 소용돌이
+      ctx.globalAlpha = 1; ctx.shadowBlur = 12; ctx.lineWidth = 2.5;
+      const a0 = G.t * 12; ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 1, a0, a0 + 4.6); ctx.stroke();
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.5, 0, TAU); ctx.fill();
+    } else if (bh === 'dot') {
+      // 불씨: 깜빡이는 글로우 코어
+      ctx.shadowBlur = 16; ctx.globalAlpha = 0.7 + 0.3 * Math.abs(Math.sin(G.t * 30 + b.x));
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+    } else if (bh === 'area') {
+      // 묵직한 폭탄: 큰 원 + 외곽 링
+      ctx.globalAlpha = 1; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 3, 0, TAU); ctx.stroke();
+    } else if (bh === 'pull') {
+      // 소용돌이: 회전하는 호(고리)
+      ctx.globalAlpha = 1; ctx.lineWidth = 2.5; ctx.shadowBlur = 12;
+      const a0 = G.t * 16 + b.x * 0.1;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 2, a0, a0 + 4.6); ctx.stroke();
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.5, 0, TAU); ctx.fill();
+    } else if (bh === 'delay') {
+      // 변칙: 정지 구간엔 충전 링, 아니면 점
+      ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+      const paused = b.age >= b.pauseAt && b.age < b.pauseAt + b.pauseFor;
+      if (paused) {
+        const p = (b.age - b.pauseAt) / b.pauseFor;
+        ctx.globalAlpha = 0.8; ctx.lineWidth = 2; ctx.shadowBlur = 14;
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 4 + p * 6, 0, TAU); ctx.stroke();
+      }
+    } else if (bh === 'knockback') {
+      // 무거운 덩어리: 큰 사각
+      ctx.globalAlpha = 1; ctx.shadowBlur = 12;
+      ctx.fillRect(b.x - b.r, b.y - b.r, b.r * 2, b.r * 2);
+    } else if (bh === 'fragment') {
+      // 군집: 가운데 + 작은 위성들
+      ctx.globalAlpha = 1; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+      for (let k = 0; k < 3; k++) { const a = G.t * 8 + k / 3 * TAU; ctx.beginPath(); ctx.arc(b.x + Math.cos(a) * (b.r + 2), b.y + Math.sin(a) * (b.r + 2), 1.6, 0, TAU); ctx.fill(); }
+    } else {
+      // straight / scatter: 기본 점
+      ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+    }
+  }
+  ctx.restore();
+
+  // --- 동적동기화(민트×퍼플): 가까운 투사체끼리 중력 레이저 실로 연결 ---
+  const sync = G.bullets.filter(b => b.combo === 'mint+purple' && b.life > 0);
+  if (sync.length > 1) {
+    ctx.save(); ctx.strokeStyle = '#b97cff'; ctx.shadowColor = '#b97cff'; ctx.shadowBlur = 8;
+    ctx.lineWidth = 1.5; ctx.globalAlpha = 0.5 + 0.2 * Math.abs(Math.sin(G.t * 8));
+    let drawn = 0;
+    for (let i = 0; i < sync.length && drawn < 40; i++) {
+      for (let j = i + 1; j < sync.length && drawn < 40; j++) {
+        const dx = sync[i].x - sync[j].x, dy = sync[i].y - sync[j].y;
+        if (dx * dx + dy * dy < 9000) { ctx.beginPath(); ctx.moveTo(sync[i].x, sync[i].y); ctx.lineTo(sync[j].x, sync[j].y); ctx.stroke(); drawn++; }
+      }
+    }
+    ctx.restore();
+  }
+
+  // --- 궤도 링 ---
+  ctx.save();
+  ctx.globalAlpha = 0.25; ctx.strokeStyle = '#1f6f86'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(CX, CY, CFG.orbitR, 0, TAU); ctx.stroke();
+  ctx.restore();
+
+  // --- 슬롯 + 조준선 (코어 스탯이 형태를 결정: 가닥수/두께/사거리/컬러) ---
+  const inOrbit = G.phase === 'orbit';
+  for (let i = 0; i < CFG.slotCount; i++) {
+    const core = G.slots[i];
+    const a = slotAngle(i);
+    const sx = CX + Math.cos(a) * CFG.orbitR, sy = CY + Math.sin(a) * CFG.orbitR;
+    // 압축 슬라이드 중인 재료 코어는 정적으로 그리지 않음(이동 글리프로 따로 그림)
+    if (G.mergeStep && G.mergeStep.phase === 'slide' && i === G.mergeStep.step.matPos) continue;
+    if (!isUnlocked(i)) { // 잠긴 슬롯 (아웃게임 미해금) — 회색 X
+      ctx.save(); ctx.globalAlpha = 0.3; ctx.strokeStyle = '#556'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(sx, sy, 6, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx - 3.5, sy - 3.5); ctx.lineTo(sx + 3.5, sy + 3.5); ctx.moveTo(sx + 3.5, sy - 3.5); ctx.lineTo(sx - 3.5, sy + 3.5); ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    if (!core) {
+      // 빈 슬롯 — 흐릿한 빈 고리. 정비 궤도에선 흡수 대상이라 점선으로 강조.
+      ctx.save();
+      ctx.globalAlpha = inOrbit ? 0.6 : 0.3;
+      ctx.strokeStyle = inOrbit ? '#6fe8d6' : '#2a5a66'; ctx.lineWidth = 1.5;
+      if (inOrbit) ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.arc(sx, sy, 6, 0, TAU); ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    const reach = CFG.orbitR + core.speed * core.life * 0.42; // 사거리 = 탄속×지속 (정의서 4장)
+    // 조준 가이드라인 — 가닥 수만큼 부채꼴로
+    ctx.save();
+    ctx.globalAlpha = G.braking ? 0.7 : 0.4;
+    ctx.strokeStyle = G.braking ? '#ffd66e' : core.color;
+    ctx.lineWidth = core.lw * (G.braking ? 1.5 : 1);
+    ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = G.braking ? 14 : 6;
+    for (let s = 0; s < core.strands; s++) {
+      const off = core.strands > 1 ? (s - (core.strands - 1) / 2) * core.spread : 0;
+      const aa = a + off;
+      ctx.beginPath(); ctx.moveTo(sx, sy);
+      ctx.lineTo(CX + Math.cos(aa) * reach, CY + Math.sin(aa) * reach);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // 합성 결과 슬롯이면 '팝' 스케일 (커졌다 가라앉음)
+    let popSc = 1;
+    if (G.mergeFx && i === G.mergeFx.slot) {
+      const p = G.mergeFx.t / G.mergeFx.dur, e = 1 - p;
+      popSc = 1 + (0.6 + G.mergeFx.tier * 0.3) * e * e;
+    }
+    drawCoreGlyph(sx, sy, core, 1, popSc); // 슬롯 코어 (티어=고리 수)
+  }
+
+  // 압축 폭발 — 결과 슬롯에서 퍼지는 충격 링(티어 비례)
+  if (G.mergeFx) {
+    const fx = G.mergeFx, p = fx.t / fx.dur;
+    const a = slotAngle(fx.slot);
+    const sx = CX + Math.cos(a) * CFG.orbitR, sy = CY + Math.sin(a) * CFG.orbitR;
+    const rings = Math.max(1, fx.tier);
+    for (let k = 0; k < rings; k++) {
+      const rp = clamp(p * 1.25 - k * 0.14, 0, 1);
+      if (rp <= 0 || rp >= 1) continue;
+      ctx.save();
+      ctx.globalAlpha = (1 - rp) * 0.9;
+      ctx.strokeStyle = k % 2 ? '#ffffff' : fx.color; ctx.lineWidth = 2.5 * (1 - rp) + 0.5;
+      ctx.shadowColor = fx.color; ctx.shadowBlur = 18;
+      ctx.beginPath(); ctx.arc(sx, sy, 6 + rp * (34 + fx.tier * 20), 0, TAU); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // 정비 궤도 레이어 (후보·고스트 프리뷰·흡수)
+  renderOrbit();
+
+  // --- 중앙 기체 ---
+  const danger = hpFrac < 0.35;
+  const warnZone = hpFrac < 0.7;
+  ctx.save();
+  ctx.translate(CX, CY);
+  // 피격 i-frame 깜빡임
+  const blink = G.iframe > 0 && (Math.floor(G.t * 20) % 2 === 0);
+  ctx.globalAlpha = blink ? 0.35 : 1;
+  // 배터리(브레이크 드레인 시 붉게 떨림 — 정의서 4)
+  let coreColor = '#9ff7e8';
+  if (G.braking) {
+    const heat = clamp(G.brakeTime / 4, 0, 1);
+    coreColor = `rgb(${155 + heat * 100},${247 - heat * 200},${232 - heat * 200})`;
+    ctx.translate(rand(-heat * 3, heat * 3), rand(-heat * 3, heat * 3));
+  }
+  // 외곽 프리즘
+  ctx.rotate(G.rot * 0.5);
+  ctx.strokeStyle = danger ? '#ff5560' : (warnZone ? '#ffc56a' : '#6fe8d6');
+  ctx.lineWidth = 2.5; ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 16;
+  ctx.beginPath();
+  for (let k = 0; k < 6; k++) { const aa = k / 6 * TAU; const px = Math.cos(aa) * 22, py = Math.sin(aa) * 22; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+  ctx.closePath(); ctx.stroke();
+  // 중심 코어
+  ctx.rotate(-G.rot * 0.5);
+  ctx.fillStyle = coreColor; ctx.shadowColor = coreColor; ctx.shadowBlur = 18;
+  ctx.beginPath(); ctx.arc(0, 0, 11, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // --- 노바 게이지 (중앙 링) ---
+  if (G.nova > 0) {
+    ctx.save();
+    ctx.strokeStyle = G.nova >= 1 ? '#ff6ad5' : '#ff9ad8';
+    ctx.lineWidth = 3.5; ctx.shadowColor = '#ff6ad5'; ctx.shadowBlur = 16;
+    ctx.globalAlpha = G.nova >= 1 ? (0.6 + 0.4 * Math.abs(Math.sin(G.t * 12))) : 0.85;
+    ctx.beginPath(); ctx.arc(CX, CY, 34, -Math.PI / 2, -Math.PI / 2 + G.nova * TAU); ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- 충격파 (노바) ---
+  if (G.shock) {
+    ctx.save();
+    ctx.globalAlpha = clamp(G.shock.life, 0, 1) * 0.9;
+    ctx.strokeStyle = '#ff6ad5'; ctx.lineWidth = 6; ctx.shadowColor = '#ff6ad5'; ctx.shadowBlur = 30;
+    ctx.beginPath(); ctx.arc(CX, CY, G.shock.r, 0, TAU); ctx.stroke();
+    ctx.globalAlpha *= 0.5; ctx.strokeStyle = '#7fe9ff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(CX, CY, G.shock.r * 0.82, 0, TAU); ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- 파티클 ---
+  for (const p of G.particles) {
+    const al = clamp(p.life / (p.max || 0.5), 0, 1);
+    ctx.save(); ctx.globalAlpha = al;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 8;
+    if (p.ripple) {
+      ctx.strokeStyle = p.color; ctx.lineWidth = 2;
+      const rr = p.r0 + (p.r - p.r0) * (1 - al);
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, TAU); ctx.stroke();
+    } else {
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  ctx.restore(); // shake
+
+  // --- 체력 비네팅 (텍스트 제로 — 정의서 2.3) ---
+  if (hpFrac < 0.7) {
+    const intensity = (0.7 - hpFrac) / 0.7;
+    const g = ctx.createRadialGradient(CX, CY, Math.min(W, H) * 0.25, CX, CY, Math.max(W, H) * 0.62);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, `rgba(${hpFrac < 0.35 ? 255 : 255},${hpFrac < 0.35 ? 30 : 140},40,${intensity * 0.55})`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  // 피격 플래시
+  if (G.flash > 0) { ctx.fillStyle = `rgba(255,40,50,${G.flash * 0.3})`; ctx.fillRect(0, 0, W, H); }
+
+  // 글리치 노이즈 라인 (체력 낮을 때)
+  if (hpFrac < 0.7) {
+    const n = Math.floor((0.7 - hpFrac) * 14);
+    ctx.save(); ctx.globalAlpha = 0.08;
+    for (let i = 0; i < n; i++) {
+      ctx.fillStyle = Math.random() < .5 ? '#ff3a4a' : '#3affd0';
+      ctx.fillRect(0, Math.random() * H, W, rand(1, 3));
+    }
+    ctx.restore();
+  }
+
+  // --- 사망 오버레이 ---
+  if (G.dead) {
+    ctx.fillStyle = 'rgba(4,6,10,0.55)'; ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.globalAlpha = 0.6 + 0.4 * Math.abs(Math.sin(G.t * 8));
+    ctx.strokeStyle = '#ff4d54'; ctx.lineWidth = 2; ctx.shadowColor = '#ff4d54'; ctx.shadowBlur = 20;
+    ctx.beginPath(); ctx.arc(CX, CY, 60, 0, TAU); ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- HUD (프로토타입 디버그용) ---
+  // HP 바: 좌상단 네온 막대 (게임 본편엔 없지만 테스터 가독성)
+  ctx.save();
+  const bw = 180, bh = 8, bx = 12, by = 12;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(bx, by, bw, bh);
+  const hc = hpFrac < 0.35 ? '#ff4d54' : hpFrac < 0.7 ? '#ffc56a' : '#3affd0';
+  ctx.fillStyle = hc; ctx.shadowColor = hc; ctx.shadowBlur = 10;
+  ctx.fillRect(bx, by, bw * hpFrac, bh);
+  ctx.restore();
+  // 코어 시험장 HUD
+  if (G.bench) {
+    const sp = T1_CORES[G.benchIdx];
+    hud.textContent =
+      `◈ 코어 시험장  [${G.benchIdx + 1}/8]  ·  B=나가기` +
+      `\n${ATTR[sp.attr].name} — ${sp.name}` +
+      `\n메커니즘: ${sp.fx}` +
+      `\n1~8 또는 [ ] = 코어 전환  ·  탁/꾹으로 조준`;
+    return;
+  }
+  // 회전 방향 / 페이즈 / 슬롯 구성
+  const slotStr = G.slots.map((c, i) => !isUnlocked(i) ? '✕' : (c ? ('T' + c.tier) : '·')).join(' ');
+  const sc = G.candidates[G.selCandIdx];
+  const candLabel = sc ? (sc.boost ? '스탯 강화 ' + sc.boost.name : sc.core.label + (sc.core.fx ? ' (' + sc.core.fx + ')' : '')) : '';
+  hud.textContent =
+    `WAVE ${G.wave}  |  KILL ${G.score}  |  NOVA×${G.novaCount}` +
+    `\nROT ${G.dir > 0 ? '↻ 시계' : '↺ 반시계'}` +
+    (G.phase === 'orbit'
+      ? (G.flyIn || G.merging
+          ? '  |  ◈ 합성 중…'
+          : G.orbitStep === 'cand'
+            ? `  |  ◈ ①선택: ${candLabel} — 탁=다음·꾹=확정·C=재추첨`
+            : G.orbitStep === 'boost'
+              ? `  |  ◈ ②강화 대상 코어 선택 (${G.pickedBoost ? G.pickedBoost.name : ''}) — 탁=다음·꾹=적용`
+              : `  |  ◈ ②슬롯: ${G.pickedCore ? G.pickedCore.label : ''} 어디에? — 탁=다음·꾹=흡수`)
+      : (G.braking ? `  |  BRAKE ${G.brakeTime.toFixed(1)}s (${currentDrain()}%/s)` : '') +
+        (G.nova >= 1 ? '  |  NOVA READY — 떼면 발동!' : '')) +
+    `\nSLOTS ${slotStr}  (해금 ${G.maxSlots}/6, L키)` +
+    (G.dead ? '\n☠ TERMINATED — R로 재시작' : '  ·  Enter=정비궤도');
+}
+
+function currentDrain() {
+  let rate = 5;
+  for (const [thr, r] of CFG.drainStages) { if (G.brakeTime <= thr) { rate = r; break; } }
+  return rate;
+}
+
+//============================================================================
+// 루프
+//============================================================================
+let last = performance.now();
+function loop(now) {
+  let dt = (now - last) / 1000; last = now;
+  dt = Math.min(dt, 0.05); // 스파이크 클램프
+  // 히트스톱(역체감): 압축 순간 잠깐 슬로모 → 타격감 (정의서 12)
+  if (G.hitStop > 0) { G.hitStop -= dt; dt *= 0.1; }
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+newGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
