@@ -91,8 +91,9 @@
 
 ### SF 알림 (텍스트리스 재해석)
 - "텍스트리스 = 긴 설명 지양이지 이름 은닉 아님"(사용자 확정). **이름만** 짧게(설명문 X), 기체 위 칩(이름+거동 글리프).
-- **조준 팝업(`G.aimToast`, 지속)**: 정비궤도 cand 단계에서 **조준선이 향한 보상의 이름**(사용자 확정 — 부착 시가 아닌 조준 시).
-  `rollCandidates`/`orbitTap`에서 `setAimToast`, 단계 전환/`finishMerge`에서 `clearAimToast`. `candInfo`가 코어/모듈/강화 → 표시정보.
+- **조준 팝업(`G.aimToast`, 지속)**: 정비궤도 cand 단계에서 **조준선이 향한 보상의 이름 + 한 줄 효과**(사용자 확정 — 부착 시가 아닌 조준 시).
+  `rollCandidates`/`orbitTap`에서 `setAimToast`, 단계 전환/`finishMerge`에서 `clearAimToast`. `candInfo`가 코어/모듈/강화 → 이름·거동·색·desc.
+  **설명 한 줄(desc)**: 코어=`core.fx`(거동 설명), Affix=`AFFIX.desc`(효과), 강화=`BOOST.desc`(수치). "이름만으론 성능 파악 어려움" 해소.
 - **일시 토스트(`pushToast`/`G.toasts`)**: 조준으로 안 보이는 **합성 결과**(`applyMergeStep`)만. 글리치 인→홀드→페이드(~1.6초).
 - 렌더 `drawToasts`(조준+일시 통합, `drawToastChip`). 획득/부착 시점 토스트는 제거(조준 팝업으로 대체).
 

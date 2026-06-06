@@ -246,20 +246,20 @@ function rollDeepweb(core) {
 //   ⚠️ '유도의'(homing)는 '유도 미사용' 확정과 충돌 → 폐기, '다중의'로 대체(사용자 확정).
 const AFFIXES = [
   // 접두(형태) — 물리 파라미터 변형
-  { id: 'giant',   name: '거대한', kind: 'prefix', stat: b => ({ ...b, bulletR: b.bulletR * 1.7, dmg: b.dmg * 1.3, speed: b.speed * 0.8 }) },
-  { id: 'orbital', name: '궤도의', kind: 'prefix', stat: b => ({ ...b, life: b.life * 1.6, speed: b.speed * 0.85 }) },
-  { id: 'multi',   name: '다중의', kind: 'prefix', stat: b => ({ ...b, strands: b.strands + 2, spread: Math.max(b.spread, 0.14) }) },
-  { id: 'pierce',  name: '관통의', kind: 'prefix', stat: b => ({ ...b, pierce: (b.pierce || 0) + 2 }) },
-  { id: 'split',   name: '분열의', kind: 'prefix', fx: { affixFrag: { frags: 3, fragSpeed: 300, fragLife: 0.3, dmgRatio: 0.4 } } },
+  { id: 'giant',   name: '거대한', kind: 'prefix', desc: '탄 크기↑ 화력↑ 속도↓', stat: b => ({ ...b, bulletR: b.bulletR * 1.7, dmg: b.dmg * 1.3, speed: b.speed * 0.8 }) },
+  { id: 'orbital', name: '궤도의', kind: 'prefix', desc: '사거리↑ 체공↑', stat: b => ({ ...b, life: b.life * 1.6, speed: b.speed * 0.85 }) },
+  { id: 'multi',   name: '다중의', kind: 'prefix', desc: '투사체 +2', stat: b => ({ ...b, strands: b.strands + 2, spread: Math.max(b.spread, 0.14) }) },
+  { id: 'pierce',  name: '관통의', kind: 'prefix', desc: '관통 +2', stat: b => ({ ...b, pierce: (b.pierce || 0) + 2 }) },
+  { id: 'split',   name: '분열의', kind: 'prefix', desc: '명중 시 파편 3분열', fx: { affixFrag: { frags: 3, fragSpeed: 300, fragLife: 0.3, dmgRatio: 0.4 } } },
   // 접미(효과) — 데미지/특수
-  { id: 'crit',    name: '치명적인', kind: 'suffix', fx: { crit: { chance: 0.25, mult: 2.5 } } },
-  { id: 'accel',   name: '가속의', kind: 'suffix', stat: b => ({ ...b, interval: b.interval * 0.78, speed: b.speed * 1.15 }) },
-  { id: 'overload',name: '과부하', kind: 'suffix', stat: b => ({ ...b, dmg: b.dmg * 1.35 }), fx: { glow: true } },
-  { id: 'format',  name: '포맷팅', kind: 'suffix', fx: { vulnOnHit: 1.5 } }, // e.vuln 장갑파괴 재사용
-  { id: 'drain',   name: '흡수의', kind: 'suffix', fx: { lifesteal: 1.5 } }, // 처치 시 hp 소량 회복
+  { id: 'crit',    name: '치명적인', kind: 'suffix', desc: '25% 치명타 ×2.5', fx: { crit: { chance: 0.25, mult: 2.5 } } },
+  { id: 'accel',   name: '가속의', kind: 'suffix', desc: '연사↑ 탄속↑', stat: b => ({ ...b, interval: b.interval * 0.78, speed: b.speed * 1.15 }) },
+  { id: 'overload',name: '과부하', kind: 'suffix', desc: '화력 ×1.35', stat: b => ({ ...b, dmg: b.dmg * 1.35 }), fx: { glow: true } },
+  { id: 'format',  name: '포맷팅', kind: 'suffix', desc: '장갑파괴(받는피해 ×1.5)', fx: { vulnOnHit: 1.5 } }, // e.vuln 재사용
+  { id: 'drain',   name: '흡수의', kind: 'suffix', desc: '처치 시 체력 회복', fx: { lifesteal: 1.5 } },
   // 마이너스(딥웹 저주용 — 거슬리지만 사격은 됨). 재화 시스템 없어 랜섬웨어는 스탯 디버프로 대체.
-  { id: 'ddos',    name: '디도스', kind: 'neg', fx: { ddos: true } }, // 화면 일부 글리치 가림
-  { id: 'ransom',  name: '랜섬웨어', kind: 'neg', stat: b => ({ ...b, dmg: b.dmg * 0.8, interval: b.interval * 1.1 }), fx: { glitchy: true } },
+  { id: 'ddos',    name: '디도스', kind: 'neg', desc: '저주 · 시야 가림', fx: { ddos: true } },
+  { id: 'ransom',  name: '랜섬웨어', kind: 'neg', desc: '저주 · 화력·연사 저하', stat: b => ({ ...b, dmg: b.dmg * 0.8, interval: b.interval * 1.1 }), fx: { glitchy: true } },
 ];
 const AFFIX_BY_ID = {}; for (const a of AFFIXES) AFFIX_BY_ID[a.id] = a;
 const AFFIX_PREFIX = AFFIXES.filter(a => a.kind === 'prefix').map(a => a.id);
@@ -702,10 +702,10 @@ function eligibleSlots() {
 
 // 유형B 스탯 오버클록 종류 (정의서 3.5/4장 6대 스탯 중)
 const BOOSTS = [
-  { stat: 'dmg', name: '화력↑', apply: c => { c.dmg *= 1.4; } },
-  { stat: 'interval', name: '연사↑', apply: c => { c.interval *= 0.78; } },
-  { stat: 'bulletR', name: '크기↑', apply: c => { c.bulletR *= 1.35; } },
-  { stat: 'strands', name: '투사체+1', apply: c => { c.strands += 1; c.spread = Math.max(c.spread, 0.16); } },
+  { stat: 'dmg', name: '화력↑', desc: '피해 ×1.4', apply: c => { c.dmg *= 1.4; } },
+  { stat: 'interval', name: '연사↑', desc: '연사 +28%', apply: c => { c.interval *= 0.78; } },
+  { stat: 'bulletR', name: '크기↑', desc: '탄 크기 ×1.35', apply: c => { c.bulletR *= 1.35; } },
+  { stat: 'strands', name: '투사체+1', desc: '투사체 +1', apply: c => { c.strands += 1; c.spread = Math.max(c.spread, 0.16); } },
 ];
 
 // 3선택 후보 생성. 유형A(완제품 코어) / 유형B(스탯 오버클록) 비율은 섹터별 (정의서 3.5).
@@ -844,7 +844,7 @@ function applyMergeStep(step) {
   // 기체 압축 훅 (정의서 8장): 광랜=연사 복리 스택, 딥웹=무작위 룰렛(대박/중간/저주)
   const ch = G.chassis;
   if (ch && ch.onCompressionSuccess) ch.onCompressionSuccess(G, step.result, step);
-  pushToast(step.result.label, step.result.behavior, step.result.color); // SF 토스트: 합성 결과 이름
+  pushToast(step.result.label, step.result.behavior, step.result.color, step.result.fx); // SF 토스트: 합성 결과 이름+효과
   const tier = step.result.tier;
   const a = slotAngle(step.basePos);
   const px = CX + Math.cos(a) * CFG.orbitR, py = CY + Math.sin(a) * CFG.orbitR;
@@ -1065,18 +1065,18 @@ function spawnRipple(x, y, color, r) {
   G.particles.push({ ripple: true, x, y, r0: r * .3, r: r, life: .35, max: .35, color });
 }
 
-// SF 알림 토스트(일시) — 합성 결과 등 '결과 이름'을 짧게. 정의서 1장 텍스트리스 재해석(긴 설명 X).
-function pushToast(name, behavior, color) {
+// SF 알림 토스트(일시) — 합성 결과 등 '결과 이름+한 줄 효과'를 짧게. 정의서 1장 텍스트리스 재해석(긴 설명 X).
+function pushToast(name, behavior, color, desc) {
   if (!G.toasts) G.toasts = [];
-  G.toasts.push({ name, behavior: behavior || null, color: color || '#7fe9ff', t: 0, dur: 1.6 });
+  G.toasts.push({ name, behavior: behavior || null, color: color || '#7fe9ff', desc: desc || null, t: 0, dur: 1.6 });
   while (G.toasts.length > 4) G.toasts.shift();
 }
-// 후보(보상) → 표시 정보. 조준 팝업/렌더 공용.
+// 후보(보상) → 표시 정보(이름·거동·색·한 줄 효과). 조준 팝업/렌더 공용.
 function candInfo(c) {
   if (!c) return null;
-  if (c.core)  return { name: c.core.label, behavior: c.core.behavior, color: c.core.color };
-  if (c.affix) { const a = AFFIX_BY_ID[c.affix.id]; return { name: 'Affix · ' + c.affix.name, behavior: null, color: (a && a.kind === 'neg') ? '#ff5560' : '#ffe08a' }; }
-  if (c.boost) return { name: '강화 · ' + c.boost.name, behavior: null, color: '#ffd66e' };
+  if (c.core)  return { name: c.core.label, behavior: c.core.behavior, color: c.core.color, desc: c.core.fx || null };
+  if (c.affix) { const a = AFFIX_BY_ID[c.affix.id]; return { name: 'Affix · ' + c.affix.name, behavior: null, color: (a && a.kind === 'neg') ? '#ff5560' : '#ffe08a', desc: a ? a.desc : null }; }
+  if (c.boost) return { name: '강화 · ' + c.boost.name, behavior: null, color: '#ffd66e', desc: c.boost.desc || null };
   return null;
 }
 // 조준 팝업(지속) — 정비궤도에서 조준선이 향한 보상의 이름. 후보 바꾸면 갱신, 단계 넘어가면 해제.
@@ -1674,38 +1674,43 @@ function drawCandidate(x, y, c, alpha, scale) {
   else drawBoostIcon(x, y, alpha, scale);
 }
 
-// SF 칩 1개 그리기 (이름 + 좌측 거동 글리프). 기체 위 중앙 정렬.
+// SF 칩 1개 그리기 (이름 + 한 줄 효과 + 좌측 거동 글리프). 기체 위 중앙 정렬.
+const TOAST_NAME_FONT = '600 15px ui-monospace, Consolas, monospace';
+const TOAST_DESC_FONT = '500 11px ui-monospace, Consolas, monospace';
 function drawToastChip(item, yy) {
-  const hasGlyph = !!item.behavior;
+  const hasGlyph = !!item.behavior, hasDesc = !!item.desc;
   const padL = hasGlyph ? 30 : 14;
-  const bw = ctx.measureText(item.name).width + padL + 14;
-  const x0 = CX - bw / 2 + (item.jit || 0);
+  ctx.font = TOAST_NAME_FONT; const nameW = ctx.measureText(item.name).width;
+  let descW = 0; if (hasDesc) { ctx.font = TOAST_DESC_FONT; descW = ctx.measureText(item.desc).width; }
+  const bw = Math.max(nameW, descW) + padL + 14;
+  const bh = hasDesc ? 38 : 26;
+  const x0 = CX - bw / 2 + (item.jit || 0), y0 = yy - bh / 2;
   ctx.globalAlpha = item.alpha * 0.72; ctx.fillStyle = 'rgba(8,12,18,0.9)';
-  ctx.fillRect(x0, yy - 13, bw, 26);
+  ctx.fillRect(x0, y0, bw, bh);
   ctx.globalAlpha = item.alpha; ctx.strokeStyle = item.color; ctx.lineWidth = 1.3;
-  ctx.shadowColor = item.color; ctx.shadowBlur = 10; ctx.strokeRect(x0, yy - 13, bw, 26);
+  ctx.shadowColor = item.color; ctx.shadowBlur = 10; ctx.strokeRect(x0, y0, bw, bh);
   if (hasGlyph) { ctx.save(); ctx.fillStyle = item.color; ctx.strokeStyle = item.color; ctx.lineWidth = 2; ctx.shadowBlur = 6; drawCoreShape(x0 + 15, yy, 7, item.behavior); ctx.restore(); }
-  ctx.fillStyle = '#e8fbff'; ctx.shadowColor = item.color; ctx.shadowBlur = 6;
-  ctx.fillText(item.name, x0 + padL, yy + 1);
+  ctx.font = TOAST_NAME_FONT; ctx.fillStyle = '#e8fbff'; ctx.shadowColor = item.color; ctx.shadowBlur = 6;
+  ctx.fillText(item.name, x0 + padL, hasDesc ? y0 + 13 : yy + 1);
+  if (hasDesc) { ctx.font = TOAST_DESC_FONT; ctx.fillStyle = 'rgba(186,212,226,0.9)'; ctx.shadowBlur = 3; ctx.fillText(item.desc, x0 + padL, y0 + 28); }
 }
 // SF 알림 렌더 — 조준 팝업(정비궤도 보상 하이라이트, 지속) + 일시 토스트(합성 결과). 기체 위쪽.
 function drawToasts() {
   const items = [];
   if (G.aimToast) { // 조준 팝업: 지속 표시 + 진입 시 글리치 인
     const p = G.aimToast.t;
-    items.push({ name: G.aimToast.name, behavior: G.aimToast.behavior, color: G.aimToast.color,
+    items.push({ name: G.aimToast.name, behavior: G.aimToast.behavior, color: G.aimToast.color, desc: G.aimToast.desc,
       alpha: clamp(p / 0.12, 0, 1), jit: p < 0.16 ? rand(-2.5, 2.5) : 0 });
   }
   if (G.toasts) for (const t of G.toasts) { // 일시 토스트: 인→홀드→아웃
     const p = t.t / t.dur;
-    items.push({ name: t.name, behavior: t.behavior, color: t.color,
+    items.push({ name: t.name, behavior: t.behavior, color: t.color, desc: t.desc,
       alpha: clamp(p < 0.12 ? p / 0.12 : p > 0.72 ? (1 - p) / 0.28 : 1, 0, 1), jit: p < 0.16 ? rand(-2.5, 2.5) : 0 });
   }
   if (!items.length) return;
   ctx.save();
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.font = '600 15px ui-monospace, Consolas, monospace';
-  for (let i = 0; i < items.length; i++) drawToastChip(items[i], CY - 104 - (items.length - 1 - i) * 30);
+  for (let i = 0; i < items.length; i++) drawToastChip(items[i], CY - 110 - (items.length - 1 - i) * 44);
   ctx.restore();
 }
 
