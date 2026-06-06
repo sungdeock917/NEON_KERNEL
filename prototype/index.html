@@ -739,6 +739,7 @@ function rollCandidates() {
     core: p.core || null, boost: p.boost || null, affix: p.affix || null,
     ang: base + i / 3 * TAU, r: CFG.candidateR, taken: false, bob: rand(0, TAU),
   }));
+  setAimToast(G.candidates[G.selCandIdx] || G.candidates[0]); // 조준 팝업: 현재 향한 보상
 }
 
 // 스탯 강화 대상(=장착된 해금 슬롯)
@@ -755,6 +756,7 @@ function orbitTap() {
   if (G.flyIn || G.merging) return;
   if (G.orbitStep === 'cand') {
     G.selCandIdx = (G.selCandIdx + 1) % G.candidates.length;
+    setAimToast(G.candidates[G.selCandIdx]); // 조준이 다음 보상으로 → 팝업 갱신
   } else {
     const list = stepSlots();
     G.selSlotIdx = (G.selSlotIdx + 1) % list.length;
@@ -784,6 +786,7 @@ function orbitConfirm() {
         if (placeAndResolve(sim, elig[k], { ...G.pickedCore }).compressed) { G.selSlotIdx = k; break; }
       }
     }
+    clearAimToast(); // 보상 확정 → 대상선택 단계, 더 이상 보상 조준 아님
     spawnRipple(CX, CY, '#ffe08a', 26);
   } else if (G.orbitStep === 'boost') {
     // 강화/Affix 확정 → 대상 코어에 적용 후 종료 (유형 B/C 공용 대상선택)
@@ -792,10 +795,8 @@ function orbitConfirm() {
       const tc = G.slots[slot];
       if (G.pickedAffix) { // 유형C: Affix 모듈 부착
         addAffix(tc, G.pickedAffix.slot, G.pickedAffix.id);
-        pushToast(G.pickedAffix.name, null, isNegAffix(tc.affixes) ? '#ff5560' : '#ffe08a');
       } else { // 유형B: 스탯 오버클록
         G.pickedBoost.apply(tc);
-        pushToast('강화 ' + G.pickedBoost.name, tc.behavior, tc.color);
       }
       const fxCol = G.pickedAffix ? '#ffe08a' : tc.color;
       G.lastResultSlot = slot; G.mergeFx = { slot, color: fxCol, tier: 0, t: 0, dur: 0.4 };
@@ -819,7 +820,6 @@ function finishAbsorb() {
   const f = G.flyIn; G.flyIn = null;
   G.candidates = []; // 나머지 후보 정리
   G.slots[f.slot] = f.core; // 흡수한 코어 장착(빈칸/덮어쓰기)
-  pushToast(f.core.label, f.core.behavior, f.core.color); // SF 토스트: 획득 코어 이름
   // 압축 단계 계획 (clone으로 계산 → G.slots는 단계별로 적용)
   const clone = cloneSlots(G.slots);
   const plan = planCompression(clone, f.slot);
@@ -878,6 +878,7 @@ function updateMerge(dt) {
 
 // 모든 압축 종료 → 다음 웨이브 (정의서: 일반 궤도는 3선택 중 1개)
 function finishMerge() {
+  clearAimToast();
   G.mergeQueue = []; G.mergeStep = null; G.merging = false; G.candidates = [];
   G.phase = 'combat';
   G.hp = clamp(G.hp + CFG.hpRecoverWaveClear, 0, 100); // 웨이브 클리어 회복(정의서 2.1)
@@ -1064,12 +1065,23 @@ function spawnRipple(x, y, color, r) {
   G.particles.push({ ripple: true, x, y, r0: r * .3, r: r, life: .35, max: .35, color });
 }
 
-// SF 알림 토스트 — 획득/합성/Affix 부착 시 '이름'을 짧게(설명문 X, 템포 보존). 정의서 1장 텍스트리스 재해석.
+// SF 알림 토스트(일시) — 합성 결과 등 '결과 이름'을 짧게. 정의서 1장 텍스트리스 재해석(긴 설명 X).
 function pushToast(name, behavior, color) {
   if (!G.toasts) G.toasts = [];
   G.toasts.push({ name, behavior: behavior || null, color: color || '#7fe9ff', t: 0, dur: 1.6 });
   while (G.toasts.length > 4) G.toasts.shift();
 }
+// 후보(보상) → 표시 정보. 조준 팝업/렌더 공용.
+function candInfo(c) {
+  if (!c) return null;
+  if (c.core)  return { name: c.core.label, behavior: c.core.behavior, color: c.core.color };
+  if (c.affix) { const a = AFFIX_BY_ID[c.affix.id]; return { name: 'Affix · ' + c.affix.name, behavior: null, color: (a && a.kind === 'neg') ? '#ff5560' : '#ffe08a' }; }
+  if (c.boost) return { name: '강화 · ' + c.boost.name, behavior: null, color: '#ffd66e' };
+  return null;
+}
+// 조준 팝업(지속) — 정비궤도에서 조준선이 향한 보상의 이름. 후보 바꾸면 갱신, 단계 넘어가면 해제.
+function setAimToast(cand) { const info = candInfo(cand); G.aimToast = info ? { ...info, t: 0 } : null; }
+function clearAimToast() { G.aimToast = null; }
 
 //============================================================================
 // 적 스폰 (360도 예고 → 본체)
@@ -1291,8 +1303,9 @@ function update(dt) {
   }
   G.particles = G.particles.filter(p => p.life > 0);
 
-  // SF 토스트 수명
+  // SF 토스트 수명 + 조준 팝업 타이머(글리치 인 애니메이션용)
   if (G.toasts && G.toasts.length) { for (const t of G.toasts) t.t += dt; G.toasts = G.toasts.filter(t => t.t < t.dur); }
+  if (G.aimToast) G.aimToast.t += dt;
 
   // 사거리 끝(명중 없이) 처리: area=장판 / burst=산탄 폭발 / hold=중력장
   for (const b of G.bullets) {
@@ -1661,31 +1674,38 @@ function drawCandidate(x, y, c, alpha, scale) {
   else drawBoostIcon(x, y, alpha, scale);
 }
 
-// SF 알림 토스트 렌더 — 기체 위쪽에 짧게(이름+거동 글리프). 글리치 인 → 홀드 → 페이드 아웃.
+// SF 칩 1개 그리기 (이름 + 좌측 거동 글리프). 기체 위 중앙 정렬.
+function drawToastChip(item, yy) {
+  const hasGlyph = !!item.behavior;
+  const padL = hasGlyph ? 30 : 14;
+  const bw = ctx.measureText(item.name).width + padL + 14;
+  const x0 = CX - bw / 2 + (item.jit || 0);
+  ctx.globalAlpha = item.alpha * 0.72; ctx.fillStyle = 'rgba(8,12,18,0.9)';
+  ctx.fillRect(x0, yy - 13, bw, 26);
+  ctx.globalAlpha = item.alpha; ctx.strokeStyle = item.color; ctx.lineWidth = 1.3;
+  ctx.shadowColor = item.color; ctx.shadowBlur = 10; ctx.strokeRect(x0, yy - 13, bw, 26);
+  if (hasGlyph) { ctx.save(); ctx.fillStyle = item.color; ctx.strokeStyle = item.color; ctx.lineWidth = 2; ctx.shadowBlur = 6; drawCoreShape(x0 + 15, yy, 7, item.behavior); ctx.restore(); }
+  ctx.fillStyle = '#e8fbff'; ctx.shadowColor = item.color; ctx.shadowBlur = 6;
+  ctx.fillText(item.name, x0 + padL, yy + 1);
+}
+// SF 알림 렌더 — 조준 팝업(정비궤도 보상 하이라이트, 지속) + 일시 토스트(합성 결과). 기체 위쪽.
 function drawToasts() {
-  if (!G.toasts || !G.toasts.length) return;
+  const items = [];
+  if (G.aimToast) { // 조준 팝업: 지속 표시 + 진입 시 글리치 인
+    const p = G.aimToast.t;
+    items.push({ name: G.aimToast.name, behavior: G.aimToast.behavior, color: G.aimToast.color,
+      alpha: clamp(p / 0.12, 0, 1), jit: p < 0.16 ? rand(-2.5, 2.5) : 0 });
+  }
+  if (G.toasts) for (const t of G.toasts) { // 일시 토스트: 인→홀드→아웃
+    const p = t.t / t.dur;
+    items.push({ name: t.name, behavior: t.behavior, color: t.color,
+      alpha: clamp(p < 0.12 ? p / 0.12 : p > 0.72 ? (1 - p) / 0.28 : 1, 0, 1), jit: p < 0.16 ? rand(-2.5, 2.5) : 0 });
+  }
+  if (!items.length) return;
   ctx.save();
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = '600 15px ui-monospace, Consolas, monospace';
-  for (let i = 0; i < G.toasts.length; i++) {
-    const t = G.toasts[i];
-    const p = t.t / t.dur;
-    let alpha = p < 0.12 ? p / 0.12 : p > 0.72 ? (1 - p) / 0.28 : 1; // 인/홀드/아웃
-    alpha = clamp(alpha, 0, 1);
-    const jit = p < 0.16 ? rand(-2.5, 2.5) : 0;                       // 글리치 인 흔들림
-    const yy = CY - 104 - (G.toasts.length - 1 - i) * 30;             // 최신이 기체에 가깝게(아래)
-    const hasGlyph = !!t.behavior;
-    const padL = hasGlyph ? 30 : 14;
-    const bw = ctx.measureText(t.name).width + padL + 14;
-    const x0 = CX - bw / 2 + jit;
-    ctx.globalAlpha = alpha * 0.72; ctx.fillStyle = 'rgba(8,12,18,0.9)';
-    ctx.fillRect(x0, yy - 13, bw, 26);
-    ctx.globalAlpha = alpha; ctx.strokeStyle = t.color; ctx.lineWidth = 1.3;
-    ctx.shadowColor = t.color; ctx.shadowBlur = 10; ctx.strokeRect(x0, yy - 13, bw, 26);
-    if (hasGlyph) { ctx.save(); ctx.fillStyle = t.color; ctx.strokeStyle = t.color; ctx.lineWidth = 2; ctx.shadowBlur = 6; drawCoreShape(x0 + 15, yy, 7, t.behavior); ctx.restore(); }
-    ctx.fillStyle = '#e8fbff'; ctx.shadowColor = t.color; ctx.shadowBlur = 6;
-    ctx.fillText(t.name, x0 + padL, yy + 1);
-  }
+  for (let i = 0; i < items.length; i++) drawToastChip(items[i], CY - 104 - (items.length - 1 - i) * 30);
   ctx.restore();
 }
 

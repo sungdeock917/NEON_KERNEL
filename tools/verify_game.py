@@ -137,10 +137,21 @@ DRIVE_JS = r"""
       if (!G.slots.some(hasAffix)) throw new Error("affix 모듈 부착 실패");
     });
 
-    // SF 토스트
+    // SF 토스트(일시, 합성결과용)
     step("toast", () => {
       G.toasts = []; pushToast("스트리밍(T2)", "straight", "#7fe9ff");
       if (!G.toasts.length) throw new Error("pushToast 실패");
+    });
+
+    // 조준 팝업: 정비궤도 진입 시 설정 → 탁으로 갱신 → 보상 확정 시 해제
+    step("aim-popup", () => {
+      if (!G.slots.some(c => c)) G.slots[0] = makeT1Id("streamPing");
+      enterOrbit();
+      if (!G.aimToast || !G.aimToast.name) throw new Error("진입 시 조준 팝업 미설정");
+      orbitTap();
+      if (!G.aimToast) throw new Error("탁 후 조준 팝업 사라짐");
+      orbitConfirm();
+      if (G.aimToast) throw new Error("보상 확정 후에도 조준 팝업 잔류");
     });
 
     // 정상 상태로 리셋(라이브 구동이 정상 경로도 돌도록)
