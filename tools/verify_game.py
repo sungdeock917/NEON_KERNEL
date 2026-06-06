@@ -125,16 +125,25 @@ DRIVE_JS = r"""
         if (!AFFIX_BY_ID[m.id] || AFFIX_BY_ID[m.id].kind === "neg") throw new Error("모듈 보상에 마이너스/무효"); }
     });
 
-    // 유형C 보상 흐름: 후보→대상선택(boost단계)→부착 (orbitConfirm 경로)
+    // 유형C 보상 흐름: 후보→대상선택(boost단계, T3 한정)→부착 (orbitConfirm 경로)
     step("affix-reward-flow", () => {
-      if (!G.slots.some(c => c)) G.slots[0] = makeT1Id("streamPing");
+      G.slots[0] = makeCore(3, ["mint", "red"]); // Affix 부착 대상은 T3 한정
       enterOrbit();
       G.candidates[0] = { core: null, boost: null, affix: rollAffixModule(), ang: 0, r: CFG.candidateR, taken: false, bob: 0 };
       G.selCandIdx = 0;
       orbitConfirm();
       if (G.orbitStep !== "boost") throw new Error("affix 후보 확정→대상선택 단계 실패");
+      if (!affixableSlots().length) throw new Error("T3 대상 목록이 비어있음");
       orbitConfirm();
-      if (!G.slots.some(hasAffix)) throw new Error("affix 모듈 부착 실패");
+      if (!G.slots.some(c => c && c.tier === 3 && hasAffix(c))) throw new Error("T3 코어 affix 부착 실패");
+    });
+
+    // T3 한정 검증: T1만 있으면 affixableSlots 비고, 등장조건 hasT3 거짓
+    step("affix-t3-only", () => {
+      newGame(); G.slots = [makeT1Id("streamPing"), null, null, null, null, null];
+      if (affixableSlots().length !== 0) throw new Error("T1만 있는데 affix 대상이 잡힘");
+      G.slots[2] = makeCore(3, ["mint", "purple"]);
+      if (affixableSlots().length !== 1) throw new Error("T3 장착 후 affix 대상 1개여야");
     });
 
     // SF 토스트(일시, 합성결과용)

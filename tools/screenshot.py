@@ -48,14 +48,14 @@ SHOTS = [
         if (!G.slots[0]) G.slots[0] = makeT1Id('streamPing');
         setAffixes(G.slots[0], { suffix: 'ddos' });
     }"""),
-    ("8_orbit_aim_popup.png", "정비궤도 조준 팝업 (Affix 모듈 향함)", """() => {
+    ("8_orbit_aim_popup.png", "정비궤도 조준 팝업 (형태 모듈, T3 장착 시)", """() => {
         setChassisIndex(0);
-        if (!G.slots[0]) G.slots[0] = makeT1Id('streamPing');
+        G.slots[0] = makeCore(3, ['mint','red']);  // Affix는 T3 코어 장착 중에만 등장/부착
         enterOrbit();
         G.candidates[0] = { core:null, boost:null, affix:{slot:'prefix',id:'giant',name:'거대한'}, ang:0, r:CFG.candidateR, taken:false, bob:0 };
         G.candidates[1] = { core:null, boost:null, affix:{slot:'suffix',id:'crit',name:'치명적인'}, ang:2.1, r:CFG.candidateR, taken:false, bob:0 };
         G.selCandIdx = 0;
-        setAimToast(G.candidates[0]); G.aimToast.t = 0.3; // 조준 팝업: 거대한 모듈
+        setAimToast(G.candidates[0]); G.aimToast.t = 0.3; // 조준 팝업: 형태 · 거대한
     }"""),
     ("9_orbit_aim_core.png", "정비궤도 조준 팝업 (코어 향함, 거동 글리프)", """() => {
         setChassisIndex(0);

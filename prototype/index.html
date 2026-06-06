@@ -724,8 +724,9 @@ function rollCandidates() {
     if (Math.random() < t2Chance) return { core: makeT2OfColor(col) };
     const ids = T1_BY_COLOR[col]; return { core: makeT1Id(ids[(Math.random() * ids.length) | 0]) };
   };
-  // 유형C: Affix 모듈(정의서 6.4). 부착할 코어가 있어야 하고, MVP는 웨이브 게이트(정식은 LV4 해금).
-  const affixChance = hasCore && G.wave >= 5 ? 0.18 : 0;
+  // 유형C: Affix 모듈(정의서 6.4). 등장·부착 모두 T3 한정(사용자 확정 — T3 천장 이후 강화 영역).
+  const hasT3 = G.slots.some(c => c && c.tier === 3);
+  const affixChance = hasT3 ? 0.22 : 0;
   const picks = [];
   for (let i = 0; i < 3; i++) {
     if (hasCore && Math.random() < affixChance) picks.push({ affix: rollAffixModule() });
@@ -748,8 +749,17 @@ function boostableSlots() {
   for (let i = 0; i < 6; i++) if (isUnlocked(i) && G.slots[i]) out.push(i);
   return out;
 }
-// 현재 단계의 대상 슬롯 리스트 (slot=빈슬롯 흡수 / boost=장착코어 강화)
-function stepSlots() { return G.orbitStep === 'boost' ? boostableSlots() : eligibleSlots(); }
+// Affix 부착 대상 = 장착된 T3 코어만 (사용자 확정: Affix는 T3 한정 강화)
+function affixableSlots() {
+  const out = [];
+  for (let i = 0; i < 6; i++) if (isUnlocked(i) && G.slots[i] && G.slots[i].tier === 3) out.push(i);
+  return out;
+}
+// 현재 단계 대상 목록 (slot=빈슬롯 / boost단계: Affix면 T3한정 / 강화면 전 코어)
+function stepSlots() {
+  if (G.orbitStep !== 'boost') return eligibleSlots();
+  return G.pickedAffix ? affixableSlots() : boostableSlots();
+}
 
 // --- 2단계 이산 선택 (탁=다음 항목, 꾹=확정) ---
 function orbitTap() {
@@ -790,7 +800,7 @@ function orbitConfirm() {
     spawnRipple(CX, CY, '#ffe08a', 26);
   } else if (G.orbitStep === 'boost') {
     // 강화/Affix 확정 → 대상 코어에 적용 후 종료 (유형 B/C 공용 대상선택)
-    const slot = boostableSlots()[G.selSlotIdx];
+    const slot = stepSlots()[G.selSlotIdx]; // Affix면 T3한정 목록
     if (slot != null && G.slots[slot]) {
       const tc = G.slots[slot];
       if (G.pickedAffix) { // 유형C: Affix 모듈 부착
@@ -1075,7 +1085,7 @@ function pushToast(name, behavior, color, desc) {
 function candInfo(c) {
   if (!c) return null;
   if (c.core)  return { name: c.core.label, behavior: c.core.behavior, color: c.core.color, desc: c.core.fx || null };
-  if (c.affix) { const a = AFFIX_BY_ID[c.affix.id]; return { name: 'Affix · ' + c.affix.name, behavior: null, color: (a && a.kind === 'neg') ? '#ff5560' : '#ffe08a', desc: a ? a.desc : null }; }
+  if (c.affix) { const a = AFFIX_BY_ID[c.affix.id]; const ty = c.affix.slot === 'prefix' ? '형태' : '효과'; return { name: ty + ' · ' + c.affix.name, behavior: null, color: (a && a.kind === 'neg') ? '#ff5560' : '#ffe08a', desc: a ? a.desc : null }; }
   if (c.boost) return { name: '강화 · ' + c.boost.name, behavior: null, color: '#ffd66e', desc: c.boost.desc || null };
   return null;
 }
@@ -2235,7 +2245,7 @@ function render() {
   const slotStr = G.slots.map((c, i) => !isUnlocked(i) ? '✕' : (c ? ('T' + c.tier) : '·')).join(' ');
   const sc = G.candidates[G.selCandIdx];
   const candLabel = !sc ? '' : sc.boost ? '스탯 강화 ' + sc.boost.name
-    : sc.affix ? 'Affix 모듈 ' + sc.affix.name + (sc.affix.slot === 'prefix' ? '(접두)' : '(접미)')
+    : sc.affix ? (sc.affix.slot === 'prefix' ? '형태' : '효과') + ' 모듈 ' + sc.affix.name
     : sc.core.label + (sc.core.fx ? ' (' + sc.core.fx + ')' : '');
   hud.textContent =
     `WAVE ${G.wave}  |  KILL ${G.score}  |  NOVA×${G.novaCount}` +
