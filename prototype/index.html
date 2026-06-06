@@ -597,16 +597,27 @@ const WAVE_BUDGET = [4, 6, 8, 9, 11, 12, 13, 15, 16, 18, 20, 22];
 let G;
 let MAXSLOTS = 6;        // 아웃게임 해금 슬롯 수(3~6). 런 시작 시 고정 (정의서 9.4① 모델)
 function newGame() {
-  // 시작 코어 1개를 1번 슬롯에 (정의서 3.0) — 순수 직선형 4종 중 무작위
-  const startId = START_T1[(Math.random() * START_T1.length) | 0];
-  const slots = [makeT1Id(startId), null, null, null, null, null];
+  // 아웃게임 영구강화 적용 (정의서 9.4): 슬롯·체력·회전·브레이크·노바·요격·시작부스트
+  const mods = metaRunMods();
+  MAXSLOTS = mods.slots;
+  // 시작 코어: 기본 1개 + 시작부스트(정의서 9.4③). 해금 슬롯 순서대로 배치.
+  const slots = [null, null, null, null, null, null];
+  const order = SLOT_UNLOCK_ORDER.slice(0, mods.slots);
+  for (let k = 0; k < 1 + mods.startCores && k < order.length; k++) {
+    slots[order[k]] = makeT1Id(START_T1[(Math.random() * START_T1.length) | 0]);
+  }
   G = {
     t: 0,
-    hp: 100,
+    hp: mods.hpMax,
+    hpMax: mods.hpMax,           // 아웃게임 최대 체력 강화
+    rotMul: mods.rotMul,         // 회전속도 배율
+    brakeMul: mods.brakeMul,     // 브레이크 드레인 감소 배율
+    novaMul: mods.novaMul,       // 노바 충전 효율 배율
+    interceptBonus: mods.intercept, // 브레이크 사격 관통 보너스
     dir: 1,              // 회전 방향 (+1 시계, -1 반시계)
     phase: 'combat',     // 'combat' | 'orbit' (정비 궤도)
     slots,               // 6슬롯 (코어 또는 null)
-    maxSlots: MAXSLOTS,  // 해금된 슬롯 수 (그 이상은 잠김)
+    maxSlots: mods.slots, // 해금된 슬롯 수 (그 이상은 잠김)
     rot: 0,              // 슬롯 기준 각도
     braking: false,
     brakeTime: 0,        // 연속 홀드 시간
@@ -628,6 +639,8 @@ function newGame() {
     interWave: 1.2,      // 웨이브 사이 정비 텀
     flash: 0,            // 피격 플래시
     dead: false,
+    deadT: 0,            // 사망 후 경과(정산 자동 전환)
+    ended: false,        // 정산 처리 완료 가드
     shake: 0,
     score: 0,
     novaCount: 0,
@@ -667,7 +680,7 @@ function benchEquip() {
 function enterBench() {
   G.bench = true; G.phase = 'combat'; G.waveActive = false; G.merging = false;
   G.enemies.length = 0; G.bullets.length = 0; G.ebullets.length = 0; G.warnings.length = 0; G.puddles.length = 0;
-  G.hp = 100; G.dead = false; G.benchSpawnT = 0;
+  G.hp = G.hpMax || 100; G.dead = false; G.benchSpawnT = 0;
   benchEquip();
 }
 function exitBench() { G.bench = false; newGame(); }
@@ -891,7 +904,7 @@ function finishMerge() {
   clearAimToast();
   G.mergeQueue = []; G.mergeStep = null; G.merging = false; G.candidates = [];
   G.phase = 'combat';
-  G.hp = clamp(G.hp + CFG.hpRecoverWaveClear, 0, 100); // 웨이브 클리어 회복(정의서 2.1)
+  G.hp = clamp(G.hp + CFG.hpRecoverWaveClear, 0, G.hpMax); // 웨이브 클리어 회복(정의서 2.1)
   G.interWave = 0.8;
   G.waveActive = false;
 }
@@ -930,7 +943,7 @@ function pressUp() {
   if (!pressing) return;
   pressing = false;
   const held = G.t - pressStart;
-  if (G.dead) return;
+  if (G.dead) { if (G.deadT > 0.5) endGame(false); return; } // 사망 후 탭 = 정산 즉시 이동(연출 0.5s 후)
   // --- 정비 궤도: 이산 선택 (탁=다음 항목, 꾹=확정은 update에서 처리됨) ---
   if (G.phase === 'orbit') {
     // 진입 후 새로 시작한 누름만 탁으로 인정(이월 누름 무시)
@@ -952,16 +965,18 @@ function releaseBrake() {
   G.braking = false;
 }
 
-// 마우스
-cv.addEventListener('mousedown', e => { e.preventDefault(); pressDown(); });
-window.addEventListener('mouseup', e => { pressUp(); });
+// 마우스 — 게임 씬은 원버튼(pressDown/Up), 메타 씬은 버튼 클릭
+cv.addEventListener('mousedown', e => { e.preventDefault(); if (scene === 'game') pressDown(); else metaPointerDown(e.clientX, e.clientY); });
+window.addEventListener('mousemove', e => { pointer.x = e.clientX; pointer.y = e.clientY; });
+window.addEventListener('mouseup', e => { if (scene === 'game') pressUp(); });
 // 터치
-cv.addEventListener('touchstart', e => { e.preventDefault(); pressDown(); }, { passive: false });
-window.addEventListener('touchend', e => { e.preventDefault(); pressUp(); }, { passive: false });
-window.addEventListener('touchcancel', e => { pressUp(); });
-// 키보드 (스페이스 = 누름, R 재시작, H 안내)
+cv.addEventListener('touchstart', e => { e.preventDefault(); const t = e.changedTouches[0]; pointer.x = t.clientX; pointer.y = t.clientY; if (scene === 'game') pressDown(); else metaPointerDown(t.clientX, t.clientY); }, { passive: false });
+window.addEventListener('touchend', e => { e.preventDefault(); if (scene === 'game') pressUp(); }, { passive: false });
+window.addEventListener('touchcancel', e => { if (scene === 'game') pressUp(); });
+// 키보드 (스페이스 = 누름, R 재시작, H 안내) — 게임 씬에서만
 let spaceDown = false;
 window.addEventListener('keydown', e => {
+  if (scene !== 'game') return; // 메타 씬은 키보드 단축키 비활성
   if (e.code === 'Space' && !spaceDown) { spaceDown = true; pressDown(); e.preventDefault(); }
   else if (e.code === 'KeyR') { newGame(); }
   else if (e.code === 'KeyH') { help.classList.toggle('hidden'); }
@@ -1055,8 +1070,9 @@ function fireSlot(i) {
         dotDps: bp.dotDps, dotTime: bp.dotTime, life: core.life, pierce: 0, dmg: 0 }, fx));
       continue;
     }
+    const pierce = core.pierce + (G.braking ? (G.interceptBonus || 0) : 0); // 아웃게임 요격 강화: 브레이크 관통↑
     const b = tagAffix({ x: ox, y: oy, vx: Math.cos(a) * core.speed, vy: Math.sin(a) * core.speed,
-      life: core.life, r: core.bulletR, dmg: core.dmg, pierce: core.pierce, color: core.color, behavior: bh, combo: core.combo }, fx);
+      life: core.life, r: core.bulletR, dmg: core.dmg, pierce, color: core.color, behavior: bh, combo: core.combo }, fx);
     // 메커니즘별 추가 파라미터를 탄에 부여 (코어 bparams에서)
     if (bh === 'dot') { b.dotDps = bp.dotDps; b.dotTime = bp.dotTime; }
     else if (bh === 'area') { b.puddleR = bp.puddleR; b.puddleDps = bp.puddleDps; b.puddleTime = bp.puddleTime; }
@@ -1135,7 +1151,7 @@ function doSpawn(ang, def) {
 // 업데이트
 //============================================================================
 function update(dt) {
-  if (G.dead) return;
+  if (G.dead) { G.deadT += dt; if (G.deadT > 1.8) endGame(false); return; } // 사망 → 정산 자동 전환
   G.t += dt;
 
   // 입력 → 브레이크 판정 (전투에서만): TAP_MAX 넘게 누르면 브레이크 진입
@@ -1150,16 +1166,17 @@ function update(dt) {
 
   // 회전: 전투 중 브레이크 아닐 때만. 정비 궤도는 회전 정지(이산 선택).
   if (G.phase === 'combat' && !G.braking) {
-    G.rot += G.dir * CFG.rotSpeed * dt;
+    G.rot += G.dir * CFG.rotSpeed * (G.rotMul || 1) * dt; // 아웃게임 회전속도 강화(정의서 9.4②)
   } else if (G.braking && G.phase === 'combat' && !G.bench) {
     // 브레이크 드레인 + 노바 충전 (정비 궤도·시험장에선 드레인 없음)
     G.brakeTime += dt;
     let rate = 5;
     for (const [thr, r] of CFG.drainStages) { if (G.brakeTime <= thr) { rate = r; break; } }
     if (G.chassis && G.chassis.brakeDrain) rate = G.chassis.brakeDrain(G, rate);
+    rate *= (G.brakeMul || 1); // 아웃게임 브레이크 효율(드레인 감소)
     if (rate > 0) G.hp -= rate * dt;
     if (G.brakeTime >= CFG.novaChargeStart) {
-      G.nova = clamp(G.nova + dt / CFG.novaChargeTime, 0, 1);
+      G.nova = clamp(G.nova + dt / CFG.novaChargeTime * (G.novaMul || 1), 0, 1); // 노바 충전 효율
     }
     if (G.chassis && G.chassis.onUpdate) G.chassis.onUpdate(G, dt);
     if (G.hp <= 0) { G.hp = 0; die(); }
@@ -1354,7 +1371,7 @@ function update(dt) {
       }
     } else {
       G.interWave -= dt;
-      if (G.interWave <= 0) startWave(G.wave + 1);
+      if (G.interWave <= 0) { if (G.wave >= 30) endGame(true); else startWave(G.wave + 1); } // 30방 클리어=승리(정의서 11)
     }
   }
 }
@@ -1428,7 +1445,7 @@ function collide(dt) {
         e.hp -= b.dmgps * dt * (e.vuln || 1); e.hit = 0.08;
         if (b.vulnOnHit) e.vuln = Math.max(e.vuln || 1, b.vulnOnHit); // 포맷팅(장갑파괴)
         if (b.dotDps) e.burn = { dps: b.dotDps, time: b.dotTime };
-        if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, 100); } // 흡수의
+        if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, G.hpMax); } // 흡수의
       }
     }
   }
@@ -1448,7 +1465,7 @@ function collide(dt) {
         spawnRipple(b.x, b.y, e.color, 12);
         applyHitBehavior(b, e); // 거동별 효과(DOT/넉백/인력/장판/파편/버스트/홀드)
         if (b.combo && COMBO_FX[b.combo] && COMBO_FX[b.combo].onHit) COMBO_FX[b.combo].onHit(b, e); // T3 색조합 효과
-        if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, 100); } // 흡수의
+        if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, G.hpMax); } // 흡수의
         if ((b.pierce || 0) > 0) { b.pierce--; b._hit = e; } // 관통: 한 번 더 통과
         else { b.life = -1; break; }
       }
@@ -1836,7 +1853,7 @@ function render() {
   ctx.save();
   if (G.shake > 0) ctx.translate(rand(-G.shake, G.shake) * .5, rand(-G.shake, G.shake) * .5);
 
-  const hpFrac = G.hp / 100;
+  const hpFrac = G.hp / (G.hpMax || 100);
 
   // --- 예고 글로우 (외곽 각도) ---
   for (const w of G.warnings) {
@@ -2283,20 +2300,296 @@ function affixHudStr() {
 }
 
 //============================================================================
+// 아웃게임 (메타) — 정의서 9장: 통합 커널 마스터리
+//============================================================================
+const SAVE_KEY = 'neonkernel_save_v1';
+// 영구 강화 — 기체 피지컬 4종 (정의서 9.4②). 비용=단일 통화, 효과는 런 수정자로.
+const PHYS_LIST = [
+  { key: 'rot',       name: '회전 속도',    max: 3, cost: [40, 90, 160],        eff: l => '×' + (1 + l * 0.12).toFixed(2) },
+  { key: 'hp',        name: '최대 체력',    max: 5, cost: [30, 60, 100, 160, 240], eff: l => '+' + (l * 20) },
+  { key: 'intercept', name: '요격 처리량',  max: 4, cost: [50, 100, 180, 280],   eff: l => '관통 +' + l },
+  { key: 'brake',     name: '브레이크 효율', max: 4, cost: [50, 100, 180, 280],   eff: l => '드레인 -' + (l * 15) + '%' },
+];
+// 슬롯 개방 (정의서 9.4①) — 재화 + 진척 조건(섹터 보스 도달) 둘 다 충족
+const SLOT_STEPS = [
+  { n: 4, cost: 60,  reqWave: 10, reqLabel: '섹터1 보스(10방)' },
+  { n: 5, cost: 150, reqWave: 20, reqLabel: '섹터2 보스(20방)' },
+  { n: 6, cost: 320, reqWave: 21, reqLabel: '섹터3 진입(21방)' },
+];
+const STARTBOOST = { name: '시작 부스트', max: 2, cost: [80, 200], eff: l => '시작 코어 +' + l };
+const CHASSIS_COLOR = { legacy: '#7fe9ff', proxy: '#7affc0', gwanglan: '#ffd66e', glitch: '#ff6ad5', deepweb: '#b97cff' };
+
+function defaultSave() {
+  return { v: 1, currency: 0, slots: 3, phys: { rot: 0, hp: 0, intercept: 0, brake: 0 },
+           startBoost: 0, chassis: 'legacy', cleared: false, best: { wave: 0, t3: 0 } };
+}
+function loadSave() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY));
+    if (s && s.v === 1) { const d = defaultSave(); return { ...d, ...s, phys: { ...d.phys, ...(s.phys || {}) }, best: { ...d.best, ...(s.best || {}) } }; }
+  } catch (e) {}
+  return defaultSave();
+}
+let SAVE = loadSave();
+function persist() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); } catch (e) {} }
+
+// 강화 → 런 수정자 (newGame이 사용)
+function metaRunMods() {
+  const s = SAVE || defaultSave();
+  return { slots: s.slots, hpMax: 100 + s.phys.hp * 20, rotMul: 1 + s.phys.rot * 0.12,
+           brakeMul: 1 - s.phys.brake * 0.15, novaMul: 1 + s.phys.brake * 0.12,
+           intercept: s.phys.intercept, startCores: s.startBoost };
+}
+function chassisLocked(ch) { return ch.id === 'deepweb' && !SAVE.cleared; } // 딥웹=클리어 선행(8.2)
+
+// ---- 씬 상태 ----
+let scene = 'main';        // 'main'|'select'|'upgrade'|'game'|'result'
+let metaT = 0;             // 메타 애니메이션 시간
+let pointer = { x: 0, y: 0 };
+let lastResult = null;     // 정산 데이터
+let metaButtons = [];      // 현재 프레임 클릭 영역
+
+function goScene(s) {
+  scene = s;
+  hud.style.display = (s === 'game') ? '' : 'none';
+  help.style.display = (s === 'game') ? '' : 'none';
+}
+function startGame() {
+  const idx = CHASSIS.findIndex(c => c.id === SAVE.chassis);
+  currentChassisIndex = idx >= 0 ? idx : 0;
+  newGame();
+  goScene('game');
+}
+function t3Count() { return G.slots.filter(c => c && c.tier === 3).length; }
+// 사망/클리어 정산 (정의서 9.3 환전 루프)
+function endGame(cleared) {
+  if (G.ended) return; G.ended = true;
+  const wave = G.wave, t3 = t3Count();
+  let reward = wave * 3;
+  if (wave >= 10) reward += 30;
+  if (wave >= 20) reward += 60;
+  if (wave >= 30) reward += 120;
+  const firstClear = wave > SAVE.best.wave ? (wave - SAVE.best.wave) * 8 : 0;
+  reward += firstClear + t3 * 10;
+  lastResult = { wave, t3, reward, firstClear, cleared, record: wave > SAVE.best.wave };
+  SAVE.currency += reward;
+  SAVE.best.wave = Math.max(SAVE.best.wave, wave);
+  SAVE.best.t3 = Math.max(SAVE.best.t3, t3);
+  if (cleared) SAVE.cleared = true;
+  persist();
+  goScene('result');
+}
+
+// ---- 구매 ----
+function buyPhys(p) {
+  const lv = SAVE.phys[p.key];
+  if (lv >= p.max || SAVE.currency < p.cost[lv]) return;
+  SAVE.currency -= p.cost[lv]; SAVE.phys[p.key]++; persist();
+}
+function buyStartBoost() {
+  const lv = SAVE.startBoost;
+  if (lv >= STARTBOOST.max || SAVE.currency < STARTBOOST.cost[lv]) return;
+  SAVE.currency -= STARTBOOST.cost[lv]; SAVE.startBoost++; persist();
+}
+function buySlot() {
+  const step = SLOT_STEPS.find(s => s.n === SAVE.slots + 1);
+  if (!step || SAVE.currency < step.cost || SAVE.best.wave < step.reqWave) return;
+  SAVE.currency -= step.cost; SAVE.slots++; persist();
+}
+
+// ---- 메타 입력 ----
+function metaPointerDown(x, y) {
+  for (const b of metaButtons) {
+    if (!b.disabled && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.action(); return; }
+  }
+}
+
+// ---- 메타 렌더 헬퍼 ----
+function btn(x, y, w, h, label, action, opts) {
+  opts = opts || {};
+  metaButtons.push({ x, y, w, h, label, action, sub: opts.sub, disabled: !!opts.disabled, color: opts.color || '#7fe9ff', accent: opts.accent });
+}
+function drawButtons() {
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const b of metaButtons) {
+    const hover = !b.disabled && pointer.x >= b.x && pointer.x <= b.x + b.w && pointer.y >= b.y && pointer.y <= b.y + b.h;
+    ctx.globalAlpha = b.disabled ? 0.32 : 1;
+    ctx.fillStyle = hover ? 'rgba(30,55,72,0.55)' : 'rgba(10,16,24,0.55)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = b.color; ctx.lineWidth = hover ? 2.2 : 1.4; ctx.shadowColor = b.color; ctx.shadowBlur = hover ? 16 : 7;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.shadowBlur = 5; ctx.fillStyle = '#eafcff';
+    ctx.font = '600 16px ui-monospace, Consolas, monospace';
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + (b.sub ? b.h / 2 - 9 : b.h / 2));
+    if (b.sub) { ctx.font = '500 11.5px ui-monospace, Consolas, monospace'; ctx.fillStyle = b.accent || 'rgba(184,210,225,0.9)'; ctx.fillText(b.sub, b.x + b.w / 2, b.y + b.h / 2 + 10); }
+  }
+  ctx.restore();
+}
+function drawTitleText(s, y, size, color) {
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '700 ' + size + 'px ui-monospace, Consolas, monospace';
+  ctx.fillStyle = color || '#dffaff'; ctx.shadowColor = color || '#7fe9ff'; ctx.shadowBlur = 16;
+  ctx.fillText(s, CX, y); ctx.restore();
+}
+function drawCurrency() {
+  ctx.save(); ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.font = '600 16px ui-monospace, Consolas, monospace';
+  ctx.fillStyle = '#ffe08a'; ctx.shadowColor = '#ffe08a'; ctx.shadowBlur = 10;
+  ctx.fillText('◈ ' + SAVE.currency, W - 22, 28); ctx.restore();
+}
+
+// ---- 화면들 ----
+function renderMain() {
+  // 로고
+  const pulse = 0.6 + 0.4 * Math.abs(Math.sin(metaT * 1.5));
+  drawTitleText('NEON  KERNEL', CY - 150, 44, '#7fe9ff');
+  ctx.save(); ctx.textAlign = 'center'; ctx.font = '500 13px ui-monospace, Consolas, monospace';
+  ctx.fillStyle = 'rgba(120,200,220,' + pulse + ')'; ctx.fillText('ONE-BUTTON ROGUELITE', CX, CY - 118); ctx.restore();
+  drawCurrency();
+  // 선택 기체 표시
+  const ch = CHASSIS[Math.max(0, CHASSIS.findIndex(c => c.id === SAVE.chassis))];
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '500 13px ui-monospace, Consolas, monospace'; ctx.fillStyle = CHASSIS_COLOR[ch.id] || '#9fe';
+  ctx.fillText('기체: ' + ch.short + '   ·   슬롯 ' + SAVE.slots + '/6', CX, CY - 92); ctx.restore();
+  const bw = 240, bx = CX - bw / 2;
+  btn(bx, CY - 56, bw, 52, '▶  시작', startGame, { sub: '선택 기체로 출격', color: '#7affc0' });
+  btn(bx, CY + 8, bw, 44, '기체 선택', () => goScene('select'));
+  btn(bx, CY + 60, bw, 44, '강화', () => goScene('upgrade'), { color: '#ffd66e' });
+  // 기록
+  ctx.save(); ctx.textAlign = 'center'; ctx.font = '500 12px ui-monospace, Consolas, monospace';
+  ctx.fillStyle = 'rgba(150,175,190,0.8)';
+  ctx.fillText('최고 기록  WAVE ' + SAVE.best.wave + '  ·  완성 T3 ' + SAVE.best.t3, CX, CY + 132); ctx.restore();
+}
+
+function drawChassisIcon(x, y, ch, r) {
+  const col = CHASSIS_COLOR[ch.id] || '#9fe';
+  ctx.save(); ctx.strokeStyle = col; ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 12; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let k = 0; k < 6; k++) { const a = k / 6 * TAU - Math.PI / 2; const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+  ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, r * 0.32, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function renderSelect() {
+  drawTitleText('기체 선택', 56, 26); drawCurrency();
+  const n = CHASSIS.length, cardW = Math.min(150, (W - 60) / n - 12), gap = 12;
+  const totalW = n * cardW + (n - 1) * gap, x0 = CX - totalW / 2, cy = CY - 10, cardH = 200;
+  for (let i = 0; i < n; i++) {
+    const ch = CHASSIS[i], x = x0 + i * (cardW + gap), col = CHASSIS_COLOR[ch.id] || '#9fe';
+    const locked = chassisLocked(ch), selected = ch.id === SAVE.chassis;
+    const by = cy - cardH / 2;
+    // 카드 클릭(선택)
+    btn(x, by, cardW, cardH, '', () => { if (!locked) { SAVE.chassis = ch.id; persist(); } }, { color: selected ? '#7affc0' : col, disabled: locked });
+    // 카드 내용
+    ctx.save(); ctx.globalAlpha = locked ? 0.4 : 1; ctx.textAlign = 'center';
+    drawChassisIcon(x + cardW / 2, by + 46, ch, 22);
+    ctx.fillStyle = '#eafcff'; ctx.font = '600 15px ui-monospace, Consolas, monospace'; ctx.textBaseline = 'middle';
+    ctx.fillText(ch.short, x + cardW / 2, by + 92);
+    // 한 줄 특성 (desc 줄바꿈)
+    ctx.fillStyle = 'rgba(180,205,220,0.9)'; ctx.font = '500 10.5px ui-monospace, Consolas, monospace';
+    wrapText(ch.desc, x + cardW / 2, by + 116, cardW - 14, 13, 5);
+    if (selected) { ctx.fillStyle = '#7affc0'; ctx.font = '600 12px ui-monospace, Consolas, monospace'; ctx.fillText('● 선택됨', x + cardW / 2, by + cardH - 16); }
+    if (locked) { ctx.fillStyle = '#ff7a86'; ctx.font = '600 11px ui-monospace, Consolas, monospace'; ctx.fillText('🔒 클리어 선행', x + cardW / 2, by + cardH - 16); }
+    ctx.restore();
+  }
+  btn(CX - 70, H - 64, 140, 40, '◀ 뒤로', () => goScene('main'));
+}
+function wrapText(text, cx, y, maxW, lh, maxLines) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const words = String(text).split(/\s+/); let line = '', yy = y, lines = 0;
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, cx, yy); yy += lh; line = w; if (++lines >= maxLines - 1) break; }
+    else line = test;
+  }
+  if (line) ctx.fillText(line, cx, yy);
+}
+
+function renderUpgrade() {
+  drawTitleText('강화', 50, 26); drawCurrency();
+  const bw = 360, bx = CX - bw / 2; let y = 96;
+  // ① 슬롯 개방
+  ctx.save(); ctx.textAlign = 'left'; ctx.font = '600 13px ui-monospace, Consolas, monospace'; ctx.fillStyle = '#7fe9ff';
+  ctx.fillText('① 슬롯 개방  (' + SAVE.slots + '/6)', bx, y); ctx.restore(); y += 12;
+  const step = SLOT_STEPS.find(s => s.n === SAVE.slots + 1);
+  if (step) {
+    const reqOk = SAVE.best.wave >= step.reqWave, afford = SAVE.currency >= step.cost;
+    btn(bx, y, bw, 46, SAVE.slots + ' → ' + step.n + '칸 개방',
+      buySlot, { sub: '◈' + step.cost + (reqOk ? '' : '  ·  요구: ' + step.reqLabel), disabled: !reqOk || !afford,
+                 accent: reqOk ? (afford ? '#ffe08a' : '#ff7a86') : '#ff7a86' });
+  } else { btn(bx, y, bw, 46, '슬롯 최대 (6/6)', () => {}, { disabled: true }); }
+  y += 64;
+  // ② 기체 피지컬
+  ctx.save(); ctx.textAlign = 'left'; ctx.font = '600 13px ui-monospace, Consolas, monospace'; ctx.fillStyle = '#7affc0';
+  ctx.fillText('② 기체 피지컬', bx, y); ctx.restore(); y += 12;
+  const hw = (bw - 12) / 2;
+  for (let i = 0; i < PHYS_LIST.length; i++) {
+    const p = PHYS_LIST[i], lv = SAVE.phys[p.key], maxed = lv >= p.max;
+    const cost = maxed ? null : p.cost[lv], afford = !maxed && SAVE.currency >= cost;
+    const x = bx + (i % 2) * (hw + 12), ry = y + ((i / 2) | 0) * 56;
+    btn(x, ry, hw, 48, p.name + '  ' + lv + '/' + p.max,
+      () => buyPhys(p), { color: '#7affc0',
+        sub: maxed ? 'MAX · ' + p.eff(lv) : '◈' + cost + '  ' + p.eff(lv + 1),
+        disabled: maxed || !afford, accent: maxed ? '#7affc0' : (afford ? '#ffe08a' : '#ff7a86') });
+  }
+  y += 2 * 56 + 8;
+  // ③ 시작 부스트
+  ctx.save(); ctx.textAlign = 'left'; ctx.font = '600 13px ui-monospace, Consolas, monospace'; ctx.fillStyle = '#ffd66e';
+  ctx.fillText('③ 시작 부스트', bx, y); ctx.restore(); y += 12;
+  const sLv = SAVE.startBoost, sMax = sLv >= STARTBOOST.max, sCost = sMax ? null : STARTBOOST.cost[sLv], sAfford = !sMax && SAVE.currency >= sCost;
+  btn(bx, y, bw, 46, STARTBOOST.name + '  ' + sLv + '/' + STARTBOOST.max, buyStartBoost,
+    { color: '#ffd66e', sub: sMax ? 'MAX · ' + STARTBOOST.eff(sLv) : '◈' + sCost + '  ' + STARTBOOST.eff(sLv + 1),
+      disabled: sMax || !sAfford, accent: sMax ? '#ffd66e' : (sAfford ? '#ffe08a' : '#ff7a86') });
+  btn(CX - 70, H - 60, 140, 40, '◀ 뒤로', () => goScene('main'));
+}
+
+function renderResult() {
+  const r = lastResult || { wave: 0, t3: 0, reward: 0, firstClear: 0, cleared: false, record: false };
+  drawTitleText(r.cleared ? 'SYSTEM CLEARED' : 'TERMINATED', CY - 150, 32, r.cleared ? '#7affc0' : '#ff5d54');
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let y = CY - 86;
+  const line = (label, val, col) => { ctx.font = '500 15px ui-monospace, Consolas, monospace'; ctx.fillStyle = 'rgba(170,195,210,0.9)'; ctx.textAlign = 'right'; ctx.fillText(label, CX - 10, y); ctx.fillStyle = col || '#eafcff'; ctx.textAlign = 'left'; ctx.shadowColor = col || '#7fe9ff'; ctx.shadowBlur = 6; ctx.fillText(val, CX + 10, y); ctx.shadowBlur = 0; y += 30; };
+  line('도달', 'WAVE ' + r.wave + (r.record ? '  ★신기록' : ''), r.record ? '#ffe08a' : '#eafcff');
+  line('완성 T3', r.t3 + '개', '#b97cff');
+  line('획득 재화', '◈ ' + r.reward + (r.firstClear ? '  (+첫도달 ' + r.firstClear + ')' : ''), '#ffe08a');
+  line('누적 재화', '◈ ' + SAVE.currency, '#ffd66e');
+  ctx.restore();
+  btn(CX - 110, CY + 70, 220, 48, '메인으로', () => goScene('main'), { color: '#7affc0' });
+}
+
+function renderMeta() {
+  ctx.clearRect(0, 0, W, H); // 캔버스 네온 배경(CSS) 비침
+  // 미세 글리치 스캔라인
+  ctx.save(); ctx.globalAlpha = 0.05;
+  for (let i = 0; i < 3; i++) { ctx.fillStyle = i % 2 ? '#39f4d0' : '#7fe9ff'; ctx.fillRect(0, (Math.sin(metaT * 0.7 + i * 2) * 0.5 + 0.5) * H, W, 1.5); }
+  ctx.restore();
+  metaButtons = [];
+  if (scene === 'main') renderMain();
+  else if (scene === 'select') renderSelect();
+  else if (scene === 'upgrade') renderUpgrade();
+  else if (scene === 'result') renderResult();
+  drawButtons();
+}
+
+//============================================================================
 // 루프
 //============================================================================
 let last = performance.now();
 function loop(now) {
   let dt = (now - last) / 1000; last = now;
   dt = Math.min(dt, 0.05); // 스파이크 클램프
-  // 히트스톱(역체감): 압축 순간 잠깐 슬로모 → 타격감 (정의서 12)
-  if (G.hitStop > 0) { G.hitStop -= dt; dt *= 0.1; }
-  update(dt);
-  render();
+  if (scene === 'game') {
+    if (G.hitStop > 0) { G.hitStop -= dt; dt *= 0.1; } // 히트스톱(역체감, 정의서 12)
+    update(dt);
+    render();
+  } else {
+    metaT += dt;
+    renderMeta();
+  }
   requestAnimationFrame(loop);
 }
 
-newGame();
+goScene('main');
 requestAnimationFrame(loop);
 </script>
 </body>

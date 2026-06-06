@@ -29,9 +29,10 @@ DRIVE_JS = r"""
   const step = (where, fn) => { try { fn(); log.push("OK   "+where); }
     catch(e){ log.push("FAIL "+where+": "+(e&&e.stack||e)); throw Object.assign(new Error(where+": "+e), {where}); } };
   try {
+    step("boot", () => { newGame(); }); // 아웃게임 도입으로 로드 시 G 미생성 → 먼저 부팅
     step("globals-present", () => {
-      for (const n of ["G","CHASSIS","setChassisIndex","rollDeepweb","canCompress",
-                       "applyChassisToCore","reapplyChassisToAllCores","makeT1Id","newGame"]) {
+      for (const n of ["G","CHASSIS","setChassisIndex","rollDeepweb","canCompress","SAVE","goScene",
+                       "applyChassisToCore","reapplyChassisToAllCores","makeT1Id","newGame","metaRunMods"]) {
         if (typeof eval(n) === "undefined") throw new Error("missing global: "+n);
       }
     });
@@ -163,8 +164,40 @@ DRIVE_JS = r"""
       if (G.aimToast) throw new Error("보상 확정 후에도 조준 팝업 잔류");
     });
 
-    // 정상 상태로 리셋(라이브 구동이 정상 경로도 돌도록)
-    step("reset", () => { setChassisIndex(0); newGame(); });
+    // ===== 아웃게임(메타) =====
+    step("meta-save", () => {
+      if (!SAVE || SAVE.v !== 1) throw new Error("SAVE 손상");
+      const mods = metaRunMods();
+      if (mods.slots !== SAVE.slots || mods.hpMax !== 100 + SAVE.phys.hp * 20) throw new Error("metaRunMods 불일치");
+    });
+    step("meta-scenes", () => {
+      for (const s of ["main", "select", "upgrade", "result", "game"]) { goScene(s); if (scene !== s) throw new Error("goScene 실패:" + s); }
+    });
+    step("meta-buy", () => {
+      SAVE.currency = 9999; const hp0 = SAVE.phys.hp;
+      buyPhys(PHYS_LIST.find(p => p.key === "hp"));
+      if (SAVE.phys.hp !== hp0 + 1) throw new Error("buyPhys 미작동");
+      const sb0 = SAVE.startBoost; buyStartBoost(); if (SAVE.startBoost !== sb0 + 1) throw new Error("buyStartBoost 미작동");
+      // 슬롯: 진척조건 미충족 시 구매 불가
+      SAVE.slots = 3; SAVE.best.wave = 0; const sl0 = SAVE.slots; buySlot();
+      if (SAVE.slots !== sl0) throw new Error("진척조건 없이 슬롯 개방됨");
+      SAVE.best.wave = 30; buySlot(); if (SAVE.slots !== 4) throw new Error("조건 충족 후 슬롯 개방 실패");
+    });
+    step("meta-reward", () => {
+      newGame(); G.wave = 12; G.slots[0] = makeCore(3, ["mint", "red"]);
+      const cur0 = SAVE.currency; G.ended = false; endGame(false);
+      if (scene !== "result" || !lastResult || lastResult.wave !== 12) throw new Error("endGame 정산 실패");
+      if (SAVE.currency <= cur0) throw new Error("재화 미적립");
+    });
+    step("meta-deepweb-lock", () => {
+      SAVE.cleared = false;
+      if (!chassisLocked(CHASSIS.find(c => c.id === "deepweb"))) throw new Error("미클리어 시 딥웹 잠금이어야");
+      SAVE.cleared = true;
+      if (chassisLocked(CHASSIS.find(c => c.id === "deepweb"))) throw new Error("클리어 후 딥웹 해제여야");
+    });
+
+    // 정상 상태로 리셋 + 게임 씬 진입(라이브 구동에서 update/G.t 돌도록)
+    step("reset", () => { SAVE.chassis = "legacy"; startGame(); });
   } catch (e) {
     return { ok: false, where: e.where || "?", msg: String(e), log };
   }
@@ -193,7 +226,7 @@ def main():
 
         page.goto(url)
         # 게임 부팅 대기: G 정의 + 루프 1회 이상
-        page.wait_for_function("typeof G !== 'undefined' && G && G.t >= 0", timeout=8000)
+        page.wait_for_function("typeof SAVE !== 'undefined' && typeof newGame === 'function'", timeout=8000)
 
         # 신규 코드 경로 강제 구동
         result = page.evaluate(DRIVE_JS)

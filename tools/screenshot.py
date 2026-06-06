@@ -67,22 +67,51 @@ SHOTS = [
     }"""),
 ]
 
+# 아웃게임(메타) 화면 — 게임 진입 없이 씬만 전환 (이름 M_ 접두로 구분)
+META_SHOTS = [
+    ("M1_main.png", "메인 화면", """() => {
+        SAVE.currency = 740; SAVE.best.wave = 18; SAVE.best.t3 = 2; SAVE.slots = 4; SAVE.chassis = 'gwanglan';
+        goScene('main');
+    }"""),
+    ("M2_select.png", "기체 선택 화면", """() => {
+        SAVE.cleared = false; // 딥웹 잠금 표시
+        goScene('select');
+    }"""),
+    ("M3_upgrade.png", "강화 화면 (3갈래)", """() => {
+        SAVE.currency = 500; SAVE.slots = 3; SAVE.best.wave = 12;
+        SAVE.phys = { rot: 1, hp: 2, intercept: 0, brake: 1 }; SAVE.startBoost = 1;
+        goScene('upgrade');
+    }"""),
+    ("M4_result.png", "정산 화면", """() => {
+        lastResult = { wave: 23, t3: 3, reward: 246, firstClear: 40, cleared: false, record: true };
+        SAVE.currency = 986;
+        goScene('result');
+    }"""),
+]
+
 
 def main():
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
         pg = b.new_page(viewport={"width": 900, "height": 900}, device_scale_factor=2)
         pg.goto(INDEX.as_uri())
-        pg.wait_for_function("typeof G !== 'undefined' && G && G.t >= 0", timeout=8000)
-        time.sleep(1.2)  # 코어 장착·웨이브 시작 대기
+        pg.wait_for_function("typeof SAVE !== 'undefined' && typeof startGame === 'function'", timeout=8000)
+        # 인게임 화면: 매 샷마다 새 게임 진입 후 셋업
         for fname, desc, setup in SHOTS:
+            pg.evaluate("() => startGame()")
+            time.sleep(0.4)
             pg.evaluate(setup)
-            time.sleep(0.7)  # 셋업 상태를 몇 프레임 렌더
-            path = OUT / fname
-            pg.locator("canvas").screenshot(path=str(path))
-            print(f"saved {path.name}  — {desc}")
+            time.sleep(0.6)
+            pg.locator("canvas").screenshot(path=str(OUT / fname))
+            print(f"saved {fname}  — {desc}")
+        # 메타 화면
+        for fname, desc, setup in META_SHOTS:
+            pg.evaluate(setup)
+            time.sleep(0.5)
+            pg.locator("canvas").screenshot(path=str(OUT / fname))
+            print(f"saved {fname}  — {desc}")
         b.close()
-    print(f"\n{len(SHOTS)} shots -> {OUT}")
+    print(f"\n{len(SHOTS) + len(META_SHOTS)} shots -> {OUT}")
 
 
 if __name__ == "__main__":
