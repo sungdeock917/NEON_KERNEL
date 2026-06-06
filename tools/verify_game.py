@@ -164,6 +164,31 @@ DRIVE_JS = r"""
       if (G.aimToast) throw new Error("보상 확정 후에도 조준 팝업 잔류");
     });
 
+    // ===== 빔(레이저) 버그 수정 회귀 =====
+    step("beam-intercepts-ebullet", () => {
+      newGame();
+      const spec = T2_CORES.find(s => s.behavior === "beam");
+      G.slots[0] = makeT2FromIds(spec.parents[0], spec.parents[1]);
+      G.bullets = []; G.ebullets = [];
+      fireSlot(0);
+      const beam = G.bullets.find(b => b.behavior === "beam");
+      if (!beam) throw new Error("빔 미생성");
+      const ex = beam.x + Math.cos(beam.angle) * 100, ey = beam.y + Math.sin(beam.angle) * 100;
+      G.ebullets.push({ x: ex, y: ey, vx: 0, vy: 0, life: 1, r: 4 });
+      collide(0.016);
+      if (G.ebullets[0].life > 0) throw new Error("빔이 적탄을 요격 못함");
+    });
+    step("beam-no-stack", () => {
+      newGame();
+      const spec = T2_CORES.find(s => s.behavior === "beam");
+      const c = makeT2FromIds(spec.parents[0], spec.parents[1]);
+      G.slots[0] = c; G.bullets = [];
+      fireSlot(0);
+      const beam = G.bullets.find(b => b.behavior === "beam");
+      // life가 발사주기(interval×1.1)에 맞아야 — 과거 고정 0.06이면 중첩 누적
+      if (beam.life > c.interval * 1.2 + 1e-6) throw new Error("빔 life가 발사주기보다 김(중첩): " + beam.life);
+    });
+
     // ===== 아웃게임(메타) =====
     step("meta-save", () => {
       if (!SAVE || SAVE.v !== 1) throw new Error("SAVE 손상");

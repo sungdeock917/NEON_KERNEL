@@ -1063,11 +1063,14 @@ function fireSlot(i) {
     const off = core.strands > 1 ? (s - (core.strands - 1) / 2) * core.spread : 0;
     const a = base + off;
     const bp = core.bparams || {};
-    // 빔(레이저)은 이동 안 하는 히트스캔 라인 — 별도 생성
+    // 빔(레이저)은 이동 안 하는 히트스캔 라인 — 별도 생성.
+    // life는 '발사 주기'에 맞춰 1개만 유지(중첩 누적 방지). 안 그러면 짧은 interval에서 빔이 겹쳐
+    // 과도한 레이저 생성 + dmgps 중복 적용(코드과부하=interval×0.5 시 2배+) 됨.
     if (bh === 'beam') {
+      const firePeriod = core.interval * (G.braking ? CFG.brakeFireScale : 1);
       G.bullets.push(tagAffix({ x: ox, y: oy, vx: 0, vy: 0, behavior: 'beam', color: core.color, combo: core.combo,
         angle: a, range: bp.beamRange, width: bp.beamWidth, dmgps: bp.beamDmgps,
-        dotDps: bp.dotDps, dotTime: bp.dotTime, life: core.life, pierce: 0, dmg: 0 }, fx));
+        dotDps: bp.dotDps, dotTime: bp.dotTime, life: firePeriod * 1.1, pierce: 0, dmg: 0 }, fx));
       continue;
     }
     const pierce = core.pierce + (G.braking ? (G.interceptBonus || 0) : 0); // 아웃게임 요격 강화: 브레이크 관통↑
@@ -1446,6 +1449,16 @@ function collide(dt) {
         if (b.vulnOnHit) e.vuln = Math.max(e.vuln || 1, b.vulnOnHit); // 포맷팅(장갑파괴)
         if (b.dotDps) e.burn = { dps: b.dotDps, time: b.dotTime };
         if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, G.hpMax); } // 흡수의
+      }
+    }
+    // 빔도 적 투사체 요격(방어) — 라인을 가로지르는 적탄 소멸 (버그수정: 레이저가 못 막던 문제)
+    for (const eb of G.ebullets) {
+      if (eb.life <= 0) continue;
+      const rx = eb.x - b.x, ry = eb.y - b.y;
+      const proj = rx * dx + ry * dy;
+      if (proj < 0 || proj > b.range) continue;
+      if (Math.abs(rx * dy - ry * dx) < b.width + eb.r + CFG.interceptPad) {
+        eb.life = -1; spawnRipple(eb.x, eb.y, '#ffae6a', 10);
       }
     }
   }
