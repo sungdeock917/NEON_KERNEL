@@ -30,7 +30,8 @@ COLLECT = r"""
       rows.push({ strands: c.strands, dmg: +c.dmg.toFixed(4), interval: +c.interval.toFixed(4),
                   bulletR: +c.bulletR.toFixed(2), speed: Math.round(c.speed), life: +c.life.toFixed(3),
                   rawDPS: +(c.strands * c.dmg / c.interval).toFixed(2),
-                  range: Math.round(c.speed * c.life) });
+                  range: Math.round(c.speed * c.life),
+                  bp: { ...(c.bparams || {}) } });  // 기체별 bparams 스냅샷(이제 dmg채널이 기체스케일됨)
     }
     return { rows, behavior, bp };
   };
@@ -84,26 +85,24 @@ def main():
         return 0.0
 
     def eff_row(core):
-        """effDPS = 직격 throughput(기체스케일) + 거동채널(기체불변). 글리치는 듀티 보정."""
-        rows, beh, bp = core["rows"], core["behavior"], core["bp"]
+        """effDPS = 직격 throughput(기체스케일) + 거동채널(이제 dmg채널은 기체스케일). 글리치 듀티 보정."""
+        rows, beh = core["rows"], core["behavior"]
         e = []
         for j, r in enumerate(rows):
-            v = r["rawDPS"] + channel(beh, bp, r["interval"])
+            v = r["rawDPS"] + channel(beh, r["bp"], r["interval"])  # 행별 bparams 사용
             if j == gi:
                 v *= GLITCH_DUTY
             e.append(round(v, 2))
         return e
 
-    def chassis_invariance(core):
-        """effDPS 중 기체불변 채널이 차지하는 비율(레거시 기준). 1.0에 가까울수록 기체 무의미."""
-        r0 = core["rows"][0]
-        eff = r0["rawDPS"] + channel(core["behavior"], core["bp"], r0["interval"])
-        chn = channel(core["behavior"], core["bp"], r0["interval"])
-        return (chn / eff) if eff else 0.0
+    def chassis_spread(core):
+        """레거시 대비 거동코어의 기체별 effDPS 변동폭(최대/최소). 1.0이면 기체 무의미."""
+        e = eff_row(core)
+        return (max(e) / min(e)) if min(e) else 0.0
 
     print("=" * 80)
     print("NEON KERNEL — 기체×코어 밸런스 eval")
-    print("  effDPS = 직격(strands×dmg/interval, 기체스케일) + 거동채널(dot/puddle/beam/hold, 기체불변)")
+    print("  effDPS = 직격(strands×dmg/interval) + 거동채널(dot/puddle/beam/hold)  ※둘 다 기체 dmg배율 적용")
     print("=" * 80)
     print("기체별 필터 요약:")
     print("  레거시 = 표준(기준)  |  프록시 = 탄 크기3×·속도0.3×·지속4.5×(rawDPS 동일, 거대탄→다중히트 실효↑)")
@@ -118,11 +117,8 @@ def main():
         for core in cores:
             e = eff_row(core)
             effs.append(e)
-            inv = chassis_invariance(core)
-            tag = core["behavior"]
-            mark = f"  {tag}" + (f" ⚠기체불변{inv:.0%}" if inv >= 0.5 else "")
             nm = f"{core['name']}"
-            print(f"{nm:<18}" + "".join(f"{v:>8.2f}" for v in e) + mark)
+            print(f"{nm:<18}" + "".join(f"{v:>8.2f}" for v in e) + f"  {core['behavior']}")
         flat = [v for row in effs for v in row]
         print(f"\n  {title} effDPS 밴드: {min(flat):.1f} ~ {max(flat):.1f}  ({band_ref})")
         return effs
@@ -144,18 +140,23 @@ def main():
     print("  * 프록시 배율=레거시 동일(rawDPS만 반영). 거대탄 다중히트·보호막 미반영 → 실전 체감은 더 높음")
     print("  * 딥웹은 위 base에 압축결과마다 룰렛 ×0.48~2.93(EV {:.2f}) 추가 변동".format(DEEPWEB_EV))
 
-    # --- ⚠ 설계 발견: 거동딜 코어의 기체 불변성 ---
+    # --- ✅ 검증: 거동딜 코어가 이제 기체에 반응하는가 (bparams 스케일 적용 후) ---
     print("\n" + "=" * 80)
-    print("⚠ 설계 발견: 기체 필터가 거동 데미지 채널(bparams)을 스케일하지 않음")
+    print("✅ 거동딜 코어 기체 반응 회복 검증 (effDPS 변동폭 = 최대기체/최소기체)")
     print("-" * 80)
-    print("  applyChassisToCore는 dmg/strands/interval/speed/bulletR/life만 왜곡 → bparams(dot/puddle/")
-    print("  beam/hold/burst/frag 딜)는 5기체 동일. 주력딜이 거동인 코어는 '같은 코어 다른 기체'가 약화:")
-    flagged = [(c, chassis_invariance(c)) for c in data["t1"] + data["t2"] if chassis_invariance(c) >= 0.5]
-    flagged.sort(key=lambda x: -x[1])
-    for c, inv in flagged:
-        print(f"    - {c['name']:<14} ({c['behavior']:<8}) 기체불변 비중 {inv:.0%}")
-    if not flagged:
-        print("    (해당 없음)")
+    print("  before: 거동코어는 기체 무관(변동폭 ≈1.0). after: 직격코어와 동일하게 기체에 반응해야 함.")
+    BEH = ["dot", "area", "beam", "hold", "burst", "fragment"]
+    behcores = [c for c in data["t1"] + data["t2"] if c["behavior"] in BEH]
+    for c in sorted(behcores, key=lambda x: -chassis_spread(x)):
+        sp = chassis_spread(c)
+        e = eff_row(c)
+        print(f"    - {c['name']:<14} ({c['behavior']:<8}) 변동폭 ×{sp:.2f}  "
+              f"[레거시 {e[0]:.1f} ~ 글리치 {e[gi]:.1f}]")
+    # 직격 코어 변동폭 기준(같은 폭이어야 정상)
+    proj = [c for c in data["t1"] + data["t2"] if c["behavior"] not in BEH]
+    if proj:
+        avg_proj = sum(chassis_spread(c) for c in proj) / len(proj)
+        print(f"\n  직격 코어 평균 변동폭 ×{avg_proj:.2f} (기준). 거동코어가 이 값에 수렴하면 '같은 코어 다른 기체' 회복.")
 
     # --- 광랜 스택 성장 ---
     print("\n광랜 압축스택 → 연사 복리 (streamPing 기준):")

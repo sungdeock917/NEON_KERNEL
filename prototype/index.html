@@ -173,6 +173,10 @@ function setChassisIndex(idx) {
   }
 }
 
+// 기체 dmg 배율이 거동 데미지 채널에도 적용되는 bparam 키 (유틸=반경·힘·시간은 제외).
+// 정의서 8장: 기체는 '같은 코어'의 화력을 증폭/약화 — 직격이든 거동딜이든 동일하게.
+const DMG_BPARAMS = ['dotDps', 'puddleDps', 'beamDmgps', 'holdDps', 'burstDmg', 'fragDmg'];
+
 function applyChassisToCore(core) {
   const chassis = getChassis();
   if (!core._baseStats) {
@@ -186,6 +190,18 @@ function applyChassisToCore(core) {
   core.speed = modified.speed; core.bulletR = modified.bulletR; core.life = modified.life;
   core.dmg = modified.dmg; core.lw = modified.lw; core.strands = Math.max(1, Math.round(modified.strands));
   core.spread = modified.spread; core.interval = modified.interval; core.pierce = modified.pierce;
+  // 거동 데미지 채널(bparams)에도 기체 dmg 배율 적용 (beam 코어는 base.dmg=0이라 probe로 배율 산출)
+  if (core.bparams) {
+    if (!core._baseDmgBp) {
+      core._baseDmgBp = {};
+      for (const k of DMG_BPARAMS) if (core.bparams[k] != null) core._baseDmgBp[k] = core.bparams[k];
+    }
+    let dmgMult = 1;
+    if (chassis && chassis.applyCore) {
+      dmgMult = base.dmg !== 0 ? modified.dmg / base.dmg : chassis.applyCore(core, { ...base, dmg: 1 }, G).dmg;
+    }
+    for (const k in core._baseDmgBp) core.bparams[k] = core._baseDmgBp[k] * dmgMult;
+  }
   return core;
 }
 
