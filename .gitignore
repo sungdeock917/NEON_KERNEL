@@ -5,3 +5,6 @@
 .DS_Store
 Thumbs.db
 *.swp
+
+# 검증 하네스 생성물 (재생성 가능 — python tools/screenshot.py)
+tools/shots/

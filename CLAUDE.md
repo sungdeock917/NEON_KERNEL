@@ -14,6 +14,15 @@
 - **교훈: eval 검증 시 `update()`만 말고 `render()`도 매 프레임 돌려야 함** (렌더 크래시는 update-only 테스트로 안 잡힘 — 실제 RAF 정지 버그를 그렇게 놓친 적 있음).
 - 미리보기(Claude Preview/브라우저)로 화면 확인 + 콘솔 에러 0 확인이 기본 루프.
 
+### 자동 검증 하네스 (Playwright) — 코드 수정 후 필수 실행
+- **`python tools/verify_game.py`** — 실제 Chromium으로 `prototype/index.html`을 띄워 자동 점검.
+  - 이 환경엔 **node가 없어** JS Playwright 대신 **Python Playwright**를 쓴다(`pip install playwright` + `python -m playwright install chromium` 1회 설치 완료됨).
+  - 점검 항목: ①콘솔 에러/경고 ②페이지 예외(throw) ③**RAF 생존**(`G.t` 증가 — 렌더 크래시면 RAF가 멈춰 G.t 정지 → 자동 검출. 위 교훈을 자동화).
+  - 신규/주요 코드 경로(기체 5종 전환·압축 훅·딥웹 룰렛 3분기·저주 슬롯잠금·신규 렌더 분기)를 합성으로 강제 구동 후 라이브 입력까지 흘린다.
+  - 종료코드 0=PASS / 1=FAIL. 옵션: `--headed`(창 표시), `--seconds N`(라이브 구동 시간).
+  - **새 시스템 추가 시 `DRIVE_JS`에 그 경로 step을 추가**해 회귀 커버리지를 늘릴 것.
+  - ⚠️ 구문 오류는 스크립트 전체 파싱을 죽여 게임이 백지가 된다(과거 `applyChassisToCore({...})` 닫는 `)` 누락 사례). 이 하네스가 그런 류를 즉시 잡는다.
+
 ## 조작 / 테스트 키
 - **PC**: 마우스 클릭(또는 Space) — 짧게=탁(회전반전), 길게=꾹(브레이크/흡수확정)
 - **모바일**: 터치
