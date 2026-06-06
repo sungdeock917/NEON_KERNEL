@@ -61,6 +61,39 @@ def bar(v, vmax, width=10):
     return "█" * n + "·" * (width - n)
 
 
+# Affix × 코어 수집 — 레거시 기체 고정(기체 영향 배제), 대표 코어 4종에 affix 적용 후 스탯/플래그
+COLLECT_AFFIX = r"""
+() => {
+  setChassisIndex(0); // 레거시 = 기체 배율 1.0
+  const beamSpec = T2_CORES.find(s => s.behavior === 'beam');
+  const make = {
+    '스트림핑(직격)': () => makeT1Id('streamPing'),
+    '헤비정크(넉백)': () => makeT1Id('heavyJunk'),
+    '도트스니펫(dot)': () => makeT1Id('dotSnippet'),
+    '오버히트레이저(beam)': () => makeT2FromIds(beamSpec.parents[0], beamSpec.parents[1]),
+  };
+  const specs = [{ label: '(없음)', spec: null, kind: 'base' }];
+  for (const id of AFFIX_PREFIX) specs.push({ label: AFFIX_BY_ID[id].name, spec: { prefix: id }, kind: 'prefix' });
+  for (const id of AFFIX_SUFFIX) specs.push({ label: AFFIX_BY_ID[id].name, spec: { suffix: id }, kind: 'suffix' });
+  for (const id of AFFIX_NEG) specs.push({ label: AFFIX_BY_ID[id].name, spec: { suffix: id }, kind: 'neg' });
+  specs.push({ label: '거대한+치명적인', spec: { prefix: 'giant', suffix: 'crit' }, kind: 'combo' });
+  specs.push({ label: '다중의+가속의', spec: { prefix: 'multi', suffix: 'accel' }, kind: 'combo' });
+  const refs = Object.keys(make);
+  const rows = [];
+  for (const s of specs) {
+    const cells = {};
+    for (const rn of refs) {
+      const c = make[rn](); setAffixes(c, s.spec);
+      cells[rn] = { behavior: c.behavior, strands: c.strands, dmg: +c.dmg.toFixed(4), interval: +c.interval.toFixed(4),
+                    bp: { ...(c.bparams || {}) }, fx: { ...(c.affixFx || {}) } };
+    }
+    rows.push({ label: s.label, kind: s.kind, cells });
+  }
+  return { refs, rows };
+}
+"""
+
+
 def main():
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
@@ -68,6 +101,7 @@ def main():
         pg.goto(INDEX.as_uri())
         pg.wait_for_function("typeof G !== 'undefined' && G && G.t >= 0", timeout=8000)
         data = pg.evaluate(COLLECT)
+        affix = pg.evaluate(COLLECT_AFFIX)
         b.close()
 
     ch = data["chassis"]  # ['레거시','프록시','광랜','글리치','딥웹']
@@ -162,6 +196,45 @@ def main():
     print("\n광랜 압축스택 → 연사 복리 (streamPing 기준):")
     for g in data["gwanglan_stacks"]:
         print(f"  stack {g['stacks']}: interval {g['interval']:.4f}s  rawDPS {g['rawDPS']:.2f}")
+
+    # ========================== Affix × effDPS ==========================
+    def affix_effdps(cell):
+        """Affix 적용 후 단일표적 effDPS. 스탯affix=엔진스탯반영, 온히트affix=EV 모델(실구현과 일치)."""
+        direct = cell["strands"] * cell["dmg"] / cell["interval"]   # 직격 throughput
+        chan = channel(cell["behavior"], cell["bp"], cell["interval"])  # 거동채널(DoT/beam 등)
+        fx = cell.get("fx") or {}
+        # 치명적인·분열의 = 직격 명중에만 (beam은 직격 dmg=0이라 자연히 무효 — 실구현과 일치)
+        if fx.get("crit"):
+            direct *= 1 + fx["crit"]["chance"] * (fx["crit"]["mult"] - 1)
+        if fx.get("affixFrag"):
+            af = fx["affixFrag"]
+            direct += cell["dmg"] * af["frags"] * af["dmgRatio"] * 0.5 / cell["interval"]
+        dps = direct + chan
+        if fx.get("vulnOnHit"):                                 # 포맷팅: 적 장갑파괴(beam 포함 모든 피해↑)
+            dps *= fx["vulnOnHit"]
+        return dps  # drain(흡수=생존)·ddos(시야)는 effDPS 무관
+
+    print("\n" + "=" * 80)
+    print("Affix × effDPS (레거시 기체 고정, 단일표적). 셀=effDPS, 괄호=무affix 대비 배율")
+    print("  ※ 스탯affix는 엔진 실측, 온히트affix(치명/포맷팅/분열)는 EV 모델 / 흡수·디도스는 effDPS 무관(별도)")
+    print("-" * 80)
+    refs = affix["refs"]
+    base = {rn: affix_effdps(affix["rows"][0]["cells"][rn]) for rn in refs}  # (없음) 행
+    shortref = [r.split("(")[0] for r in refs]
+    hdr = f"{'Affix':<16}" + "".join(f"{s:>12}" for s in shortref) + "   종류"
+    print(hdr); print("-" * len(hdr))
+    for row in affix["rows"]:
+        cellstr = ""
+        for rn in refs:
+            v = affix_effdps(row["cells"][rn])
+            mult = v / base[rn] if base[rn] else 0
+            cellstr += f"{v:>6.1f}(×{mult:.2f})"[:12].rjust(12)
+        note = ""
+        if row["label"] in ("흡수의",):  note = "  (생존, DPS 무관)"
+        if row["label"] in ("디도스",):  note = "  (시야 debuff)"
+        print(f"{row['label']:<16}" + cellstr + f"   {row['kind']}{note}")
+    print("\n  · 거대한이 beam(오버히트레이저)의 beamDmgps도 키우는지 = bparam 일관성 확인 포인트")
+    print("  · 마이너스(랜섬웨어)는 ×<1, 디도스는 DPS 1.00(시야만 방해)")
 
 
 if __name__ == "__main__":
