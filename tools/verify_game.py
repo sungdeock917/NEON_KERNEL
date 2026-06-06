@@ -77,6 +77,45 @@ DRIVE_JS = r"""
       if (canCompress(c, d) === null) throw new Error("same-color T1 should compress");
     });
 
+    // Affix 스탯 레이어: 거대한=bulletR↑dmg↑, 과부하=dmg↑. fx 플래그 세팅.
+    step("affix-stat-layer", () => {
+      const c = makeT1Id("streamPing");
+      const b0 = { dmg: c.dmg, br: c.bulletR };
+      setAffixes(c, { prefix: "giant", suffix: "overload" });
+      if (!(c.dmg > b0.dmg) || !(c.bulletR > b0.br)) throw new Error("giant/overload should raise dmg/bulletR");
+      setAffixes(c, null);
+      if (Math.abs(c.dmg - b0.dmg) > 1e-6) throw new Error("affix clear should restore base dmg");
+    });
+
+    // Affix fx 플래그: crit/vulnOnHit/affixFrag/lifesteal/ddos가 affixFx에 실림
+    step("affix-fx-flags", () => {
+      const checks = [["crit","crit"],["format","vulnOnHit"],["split","affixFrag"],["drain","lifesteal"],["ddos","ddos"]];
+      for (const [aff, key] of checks) {
+        const c = makeT1Id("streamPing");
+        const isPrefix = (aff==="split");
+        setAffixes(c, isPrefix ? { prefix: aff } : { suffix: aff });
+        if (!c.affixFx || c.affixFx[key] == null) throw new Error(aff+" → affixFx."+key+" 누락");
+      }
+    });
+
+    // Affix bparam 일관성: beam 코어 + 거대한(dmg×1.3) → beamDmgps도 스케일 (base.dmg=0 probe 경로)
+    step("affix-beam-scale", () => {
+      const spec = T2_CORES.find(s => s.behavior === "beam");
+      if (!spec) return;
+      const c = makeT2FromIds(spec.parents[0], spec.parents[1]);
+      const base = c.bparams.beamDmgps;
+      setAffixes(c, { prefix: "giant" }); // dmg×1.3
+      if (!(c.bparams.beamDmgps > base * 1.2)) throw new Error("거대한이 beamDmgps도 스케일해야(현=" + c.bparams.beamDmgps + ")");
+    });
+
+    // random/curse 헬퍼
+    step("affix-random-curse", () => {
+      const a = makeT1Id("dotSnippet"); setAffixes(a, "random");
+      if (!hasAffix(a)) throw new Error("random affix 미적용");
+      const b = makeT1Id("dotSnippet"); setAffixes(b, "curse");
+      if (!isNegAffix(b.affixes)) throw new Error("curse는 neg여야");
+    });
+
     // 정상 상태로 리셋(라이브 구동이 정상 경로도 돌도록)
     step("reset", () => { setChassisIndex(0); newGame(); });
   } catch (e) {
@@ -116,10 +155,11 @@ def main():
         t0 = page.evaluate("G.t")
         time.sleep(args.seconds)
         # 라이브 구동 중 실제 입력도 몇 번 흘려 update/render 경로 자극
-        for code in ["Space", "Space", "Enter"]:
-            page.dispatch_event("body", "keydown", {"code": code}) if False else None
         page.keyboard.press("Space")     # 탁(회전 반전)
         page.keyboard.down("Space"); time.sleep(0.4); page.keyboard.up("Space")  # 꾹(브레이크)
+        # A키로 Affix 순환(없음→무작위→저주) — 변이 글리프 마커·DDoS 오버레이 렌더 자극
+        for _ in range(3):
+            page.keyboard.press("KeyA"); time.sleep(0.35)
         page.keyboard.press("Enter")     # 정비 궤도 진입
         time.sleep(0.6)
         t1 = page.evaluate("G.t")

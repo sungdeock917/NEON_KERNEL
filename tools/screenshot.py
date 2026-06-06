@@ -36,6 +36,18 @@ SHOTS = [
         G.slots[0].deepweb = 'curse'; G.slots[0].cursed = true;
         G.slots[2].deepweb = 'jackpot';
     }"""),
+    ("6_affix_mutated.png", "Affix 변이 코어 (금빛 헤일로+접두/접미 핍)", """() => {
+        setChassisIndex(0);
+        if (!G.slots[0]) G.slots[0] = makeT1Id('streamPing');
+        if (!G.slots[2]) G.slots[2] = makeT1Id('heavyJunk');
+        setAffixes(G.slots[0], { prefix: 'giant', suffix: 'crit' });
+        setAffixes(G.slots[2], { prefix: 'orbital', suffix: 'drain' });
+    }"""),
+    ("7_affix_ddos_curse.png", "마이너스 Affix 디도스 (붉은 핍 + 시야 가림)", """() => {
+        setChassisIndex(0);
+        if (!G.slots[0]) G.slots[0] = makeT1Id('streamPing');
+        setAffixes(G.slots[0], { suffix: 'ddos' });
+    }"""),
 ]
 
 

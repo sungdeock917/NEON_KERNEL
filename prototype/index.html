@@ -185,23 +185,30 @@ function applyChassisToCore(core) {
       lw: core.lw, strands: core.strands, spread: core.spread, interval: core.interval, pierce: core.pierce,
     };
   }
-  const base = core._baseStats;
+  const rawBase = core._baseStats;
+  // 합성 순서: raw → Affix(엔드콘텐츠 변형) → 기체(하드웨어 필터). 둘 다 멱등 재계산.
+  const base = applyAffixesToBase(rawBase, core.affixes);
   const modified = chassis && chassis.applyCore ? chassis.applyCore(core, base, G) : { ...base };
   core.speed = modified.speed; core.bulletR = modified.bulletR; core.life = modified.life;
   core.dmg = modified.dmg; core.lw = modified.lw; core.strands = Math.max(1, Math.round(modified.strands));
   core.spread = modified.spread; core.interval = modified.interval; core.pierce = modified.pierce;
-  // 거동 데미지 채널(bparams)에도 기체 dmg 배율 적용 (beam 코어는 base.dmg=0이라 probe로 배율 산출)
+  // 거동 데미지 채널(bparams)에도 dmg 총배율(Affix×기체) 적용 (beam은 base.dmg=0이라 probe로 산출)
   if (core.bparams) {
     if (!core._baseDmgBp) {
       core._baseDmgBp = {};
       for (const k of DMG_BPARAMS) if (core.bparams[k] != null) core._baseDmgBp[k] = core.bparams[k];
     }
-    let dmgMult = 1;
-    if (chassis && chassis.applyCore) {
-      dmgMult = base.dmg !== 0 ? modified.dmg / base.dmg : chassis.applyCore(core, { ...base, dmg: 1 }, G).dmg;
+    let dmgMult;
+    if (rawBase.dmg !== 0) {
+      dmgMult = modified.dmg / rawBase.dmg; // raw→final 총배율 (Affix·기체 모두 포함)
+    } else { // beam 등 직격 0: 두 레이어를 단위 dmg로 probe해 곱
+      const afMult = applyAffixesToBase({ ...rawBase, dmg: 1 }, core.affixes).dmg;
+      const chMult = chassis && chassis.applyCore ? chassis.applyCore(core, { ...base, dmg: 1 }, G).dmg : 1;
+      dmgMult = afMult * chMult;
     }
     for (const k in core._baseDmgBp) core.bparams[k] = core._baseDmgBp[k] * dmgMult;
   }
+  core.affixFx = computeAffixFx(core); // 온히트/렌더 플래그 (발사 시 탄에 전파)
   return core;
 }
 
@@ -231,6 +238,73 @@ function rollDeepweb(core) {
     b.dmg *= 0.6; b.interval *= 1.25;
   }
   applyChassisToCore(core); // 변동된 _baseStats를 실제 스탯에 반영
+}
+
+// ---- 접두/접미 모듈 (Affix, 정의서 6.4) — 엔드 콘텐츠 -----------------------
+// MVP: 접두(형태)5 + 접미(효과)5 + 마이너스(딥웹 저주용)2. 정식 풀(10+10)은 점진 확장.
+//   stat(base): raw→affix 스탯 변형(기체 앞 레이어, 멱등).  fx: 온히트/렌더 플래그.
+//   ⚠️ '유도의'(homing)는 '유도 미사용' 확정과 충돌 → 폐기, '다중의'로 대체(사용자 확정).
+const AFFIXES = [
+  // 접두(형태) — 물리 파라미터 변형
+  { id: 'giant',   name: '거대한', kind: 'prefix', stat: b => ({ ...b, bulletR: b.bulletR * 1.7, dmg: b.dmg * 1.3, speed: b.speed * 0.8 }) },
+  { id: 'orbital', name: '궤도의', kind: 'prefix', stat: b => ({ ...b, life: b.life * 1.6, speed: b.speed * 0.85 }) },
+  { id: 'multi',   name: '다중의', kind: 'prefix', stat: b => ({ ...b, strands: b.strands + 2, spread: Math.max(b.spread, 0.14) }) },
+  { id: 'pierce',  name: '관통의', kind: 'prefix', stat: b => ({ ...b, pierce: (b.pierce || 0) + 2 }) },
+  { id: 'split',   name: '분열의', kind: 'prefix', fx: { affixFrag: { frags: 3, fragSpeed: 300, fragLife: 0.3, dmgRatio: 0.4 } } },
+  // 접미(효과) — 데미지/특수
+  { id: 'crit',    name: '치명적인', kind: 'suffix', fx: { crit: { chance: 0.25, mult: 2.5 } } },
+  { id: 'accel',   name: '가속의', kind: 'suffix', stat: b => ({ ...b, interval: b.interval * 0.78, speed: b.speed * 1.15 }) },
+  { id: 'overload',name: '과부하', kind: 'suffix', stat: b => ({ ...b, dmg: b.dmg * 1.35 }), fx: { glow: true } },
+  { id: 'format',  name: '포맷팅', kind: 'suffix', fx: { vulnOnHit: 1.5 } }, // e.vuln 장갑파괴 재사용
+  { id: 'drain',   name: '흡수의', kind: 'suffix', fx: { lifesteal: 1.5 } }, // 처치 시 hp 소량 회복
+  // 마이너스(딥웹 저주용 — 거슬리지만 사격은 됨). 재화 시스템 없어 랜섬웨어는 스탯 디버프로 대체.
+  { id: 'ddos',    name: '디도스', kind: 'neg', fx: { ddos: true } }, // 화면 일부 글리치 가림
+  { id: 'ransom',  name: '랜섬웨어', kind: 'neg', stat: b => ({ ...b, dmg: b.dmg * 0.8, interval: b.interval * 1.1 }), fx: { glitchy: true } },
+];
+const AFFIX_BY_ID = {}; for (const a of AFFIXES) AFFIX_BY_ID[a.id] = a;
+const AFFIX_PREFIX = AFFIXES.filter(a => a.kind === 'prefix').map(a => a.id);
+const AFFIX_SUFFIX = AFFIXES.filter(a => a.kind === 'suffix').map(a => a.id);
+const AFFIX_NEG = AFFIXES.filter(a => a.kind === 'neg').map(a => a.id);
+
+// raw 스탯에 Affix stat 변형 적용 (기체 필터 앞 레이어). affixes={prefix,suffix}.
+function applyAffixesToBase(base, affixes) {
+  if (!affixes || (!affixes.prefix && !affixes.suffix)) return { ...base };
+  let b = { ...base };
+  for (const slot of ['prefix', 'suffix']) {
+    const a = AFFIX_BY_ID[affixes[slot]];
+    if (a && a.stat) b = a.stat(b);
+  }
+  return b;
+}
+// 온히트/렌더 플래그 병합 (발사 시 탄에 전파, 렌더에서 마커)
+function computeAffixFx(core) {
+  const fx = {};
+  if (core.affixes) for (const slot of ['prefix', 'suffix']) {
+    const a = AFFIX_BY_ID[core.affixes[slot]];
+    if (a && a.fx) Object.assign(fx, a.fx);
+  }
+  return fx;
+}
+function hasAffix(core) { return !!(core && core.affixes && (core.affixes.prefix || core.affixes.suffix)); }
+function isNegAffix(affixes) {
+  if (!affixes) return false;
+  for (const s of ['prefix', 'suffix']) { const a = AFFIX_BY_ID[affixes[s]]; if (a && a.kind === 'neg') return true; }
+  return false;
+}
+// 코어에 Affix 부여(테스트/드롭 공용). spec={prefix?,suffix?} 또는 'random'/'curse'.
+function setAffixes(core, spec) {
+  if (spec === 'random') {
+    core.affixes = { prefix: AFFIX_PREFIX[(Math.random() * AFFIX_PREFIX.length) | 0],
+                     suffix: AFFIX_SUFFIX[(Math.random() * AFFIX_SUFFIX.length) | 0] };
+  } else if (spec === 'curse') {
+    core.affixes = { prefix: null, suffix: AFFIX_NEG[(Math.random() * AFFIX_NEG.length) | 0] };
+  } else if (spec == null) {
+    core.affixes = null;
+  } else {
+    core.affixes = { prefix: spec.prefix || null, suffix: spec.suffix || null };
+  }
+  applyChassisToCore(core); // 스탯/플래그 즉시 반영
+  return core;
 }
 
 // ---- 티어별 사격 스탯 (정의서 4장: 가닥수/두께/흐름속도/사거리) -------------
@@ -871,6 +945,12 @@ window.addEventListener('keydown', e => {
   else if (e.code === 'KeyQ') { setChassisIndex(currentChassisIndex - 1); }
   else if (e.code === 'KeyE') { setChassisIndex(currentChassisIndex + 1); }
   else if (/^Digit[1-5]$/.test(e.code)) { setChassisIndex(+e.code.slice(-1) - 1); }
+  // [테스트용] A = 장착 코어 Affix 순환 (없음 → 무작위 → 저주). 변이 코어 손맛/마커 확인용.
+  else if (e.code === 'KeyA') {
+    G.affixTest = ((G.affixTest || 0) + 1) % 3;
+    const spec = G.affixTest === 1 ? 'random' : G.affixTest === 2 ? 'curse' : null;
+    for (const c of G.slots) if (c) setAffixes(c, spec);
+  }
 });
 window.addEventListener('keyup', e => {
   if (e.code === 'Space') { spaceDown = false; pressUp(); e.preventDefault(); }
@@ -901,6 +981,17 @@ function fireNova() {
 //============================================================================
 function slotAngle(i) { return G.rot + (i / CFG.slotCount) * TAU; }
 
+// Affix 온히트 플래그를 탄에 부여 (crit/vulnOnHit/affixFrag/lifesteal) — collide에서 처리
+function tagAffix(b, fx) {
+  if (fx) {
+    if (fx.crit) b.crit = fx.crit;
+    if (fx.vulnOnHit) b.vulnOnHit = fx.vulnOnHit;
+    if (fx.affixFrag) b.affixFrag = fx.affixFrag;
+    if (fx.lifesteal) b.lifesteal = fx.lifesteal;
+  }
+  return b;
+}
+
 function fireSlot(i) {
   const core = G.slots[i];
   if (!core) return; // 빈 슬롯은 사격 못 함 (정의서 3.0)
@@ -908,6 +999,7 @@ function fireSlot(i) {
   const ox = CX + Math.cos(base) * CFG.orbitR;
   const oy = CY + Math.sin(base) * CFG.orbitR;
   const bh = core.behavior || 'straight';
+  const fx = core.affixFx; // Affix 온히트 플래그 (탄에 전파)
   // 가닥 수만큼 부채꼴로 동시 발사 (정의서 4장: 투사체 수 = 가닥 수)
   for (let s = 0; s < core.strands; s++) {
     const off = core.strands > 1 ? (s - (core.strands - 1) / 2) * core.spread : 0;
@@ -915,13 +1007,13 @@ function fireSlot(i) {
     const bp = core.bparams || {};
     // 빔(레이저)은 이동 안 하는 히트스캔 라인 — 별도 생성
     if (bh === 'beam') {
-      G.bullets.push({ x: ox, y: oy, vx: 0, vy: 0, behavior: 'beam', color: core.color, combo: core.combo,
+      G.bullets.push(tagAffix({ x: ox, y: oy, vx: 0, vy: 0, behavior: 'beam', color: core.color, combo: core.combo,
         angle: a, range: bp.beamRange, width: bp.beamWidth, dmgps: bp.beamDmgps,
-        dotDps: bp.dotDps, dotTime: bp.dotTime, life: core.life, pierce: 0, dmg: 0 });
+        dotDps: bp.dotDps, dotTime: bp.dotTime, life: core.life, pierce: 0, dmg: 0 }, fx));
       continue;
     }
-    const b = { x: ox, y: oy, vx: Math.cos(a) * core.speed, vy: Math.sin(a) * core.speed,
-      life: core.life, r: core.bulletR, dmg: core.dmg, pierce: core.pierce, color: core.color, behavior: bh, combo: core.combo };
+    const b = tagAffix({ x: ox, y: oy, vx: Math.cos(a) * core.speed, vy: Math.sin(a) * core.speed,
+      life: core.life, r: core.bulletR, dmg: core.dmg, pierce: core.pierce, color: core.color, behavior: bh, combo: core.combo }, fx);
     // 메커니즘별 추가 파라미터를 탄에 부여 (코어 bparams에서)
     if (bh === 'dot') { b.dotDps = bp.dotDps; b.dotTime = bp.dotTime; }
     else if (bh === 'area') { b.puddleR = bp.puddleR; b.puddleDps = bp.puddleDps; b.puddleTime = bp.puddleTime; }
@@ -1269,8 +1361,9 @@ function collide(dt) {
       if (proj < 0 || proj > b.range) continue;
       if (Math.abs(rx * dy - ry * dx) < b.width + e.r) {
         e.hp -= b.dmgps * dt * (e.vuln || 1); e.hit = 0.08;
+        if (b.vulnOnHit) e.vuln = Math.max(e.vuln || 1, b.vulnOnHit); // 포맷팅(장갑파괴)
         if (b.dotDps) e.burn = { dps: b.dotDps, time: b.dotTime };
-        if (e.hp <= 0) killEnemy(e);
+        if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, 100); } // 흡수의
       }
     }
   }
@@ -1281,11 +1374,16 @@ function collide(dt) {
       if (e.hp <= 0) continue;
       if (b._hit === e) continue; // 같은 적 중복타 방지(관통)
       if ((b.x - e.x) ** 2 + (b.y - e.y) ** 2 < (e.r + b.r) ** 2) {
-        e.hp -= (b.dmg || 1) * (e.vuln || 1); e.hit = 0.12; // vuln=열역학파쇄 등
+        let dealt = (b.dmg || 1);
+        if (b.crit && Math.random() < b.crit.chance) { dealt *= b.crit.mult; spawnRipple(b.x, b.y, '#fff2a8', 22); } // 치명적인
+        e.hp -= dealt * (e.vuln || 1); e.hit = 0.12; // vuln=열역학파쇄/포맷팅
+        if (b.vulnOnHit) e.vuln = Math.max(e.vuln || 1, b.vulnOnHit); // 포맷팅(장갑파괴)
+        if (b.affixFrag) spawnFragments(b.x, b.y, { frags: b.affixFrag.frags, fragSpeed: b.affixFrag.fragSpeed, // 분열의
+          fragLife: b.affixFrag.fragLife, fragDmg: (b.dmg || 1) * b.affixFrag.dmgRatio, color: b.color });
         spawnRipple(b.x, b.y, e.color, 12);
         applyHitBehavior(b, e); // 거동별 효과(DOT/넉백/인력/장판/파편/버스트/홀드)
         if (b.combo && COMBO_FX[b.combo] && COMBO_FX[b.combo].onHit) COMBO_FX[b.combo].onHit(b, e); // T3 색조합 효과
-        if (e.hp <= 0) killEnemy(e);
+        if (e.hp <= 0) { killEnemy(e); if (b.lifesteal) G.hp = clamp(G.hp + b.lifesteal, 0, 100); } // 흡수의
         if ((b.pierce || 0) > 0) { b.pierce--; b._hit = e; } // 관통: 한 번 더 통과
         else { b.life = -1; break; }
       }
@@ -1457,6 +1555,24 @@ function drawCoreGlyph(x, y, core, alpha, scale) {
       const a = Math.PI / 2 + (p === 0 ? -0.62 : 0.62); // 하단 좌우
       drawSatellite(x + Math.cos(a) * r * 1.85, y + Math.sin(a) * r * 1.85, pr, parents[p].beh, parents[p].col, al * 0.9);
     }
+  }
+
+  // --- Affix 변이 코어 마커 (정의서 6.4): 역회전 점선 헤일로 + 접두(좌상)/접미(우상) 핍 ---
+  if (hasAffix(core)) {
+    const neg = isNegAffix(core.affixes);
+    const hc = neg ? '#ff5560' : '#ffe08a';
+    ctx.save();
+    ctx.globalAlpha = al * (0.5 + 0.3 * Math.abs(Math.sin(G.t * 3)));
+    ctx.strokeStyle = hc; ctx.shadowColor = hc; ctx.shadowBlur = 8 * sc; ctx.lineWidth = 1.3 * sc;
+    ctx.setLineDash([3 * sc, 3 * sc]);
+    const rot = -G.t * 1.1;
+    ctx.beginPath(); ctx.arc(x, y, r * 1.95, rot, rot + TAU); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = hc; ctx.globalAlpha = al;
+    const pip = (px, py) => { ctx.beginPath(); ctx.moveTo(px, py - 2.2 * sc); ctx.lineTo(px + 2.2 * sc, py); ctx.lineTo(px, py + 2.2 * sc); ctx.lineTo(px - 2.2 * sc, py); ctx.closePath(); ctx.fill(); };
+    if (core.affixes.prefix) pip(x - r * 1.35, y - r * 1.35);
+    if (core.affixes.suffix) pip(x + r * 1.35, y - r * 1.35);
+    ctx.restore();
   }
   ctx.restore();
 }
@@ -1968,6 +2084,18 @@ function render() {
     ctx.restore();
   }
 
+  // --- DDoS 마이너스 Affix (정의서 6.4): 시야 일부 가림 — 거슬리지만 사격은 됨 ---
+  if (!G.dead && G.slots.some(c => c && c.affixFx && c.affixFx.ddos)) {
+    ctx.save();
+    for (let i = 0; i < 5; i++) {
+      const by2 = (Math.sin(G.t * 1.7 + i * 2.1) * 0.5 + 0.5) * H;
+      ctx.fillStyle = 'rgba(8,10,16,0.82)';
+      ctx.fillRect(0, by2, W, 14 + 10 * Math.abs(Math.sin(G.t * 3 + i)));
+    }
+    if (Math.sin(G.t * 9) > 0.6) { ctx.fillStyle = 'rgba(255,58,74,0.12)'; ctx.fillRect(0, (Math.random() * H) | 0, W, 4); }
+    ctx.restore();
+  }
+
   // --- HUD (프로토타입 디버그용) ---
   // HP 바: 좌상단 네온 막대 (게임 본편엔 없지만 테스터 가독성)
   ctx.save();
@@ -2006,6 +2134,7 @@ function render() {
         (G.nova >= 1 ? '  |  NOVA READY — 떼면 발동!' : '')) +
     `\nSLOTS ${slotStr}  (해금 ${G.maxSlots}/6, L키)` +
     `\nCHASSIS: ${G.chassis ? G.chassis.short : getChassis().short}  (Q/E or 1-5)` +
+    `\nAFFIX: ${affixHudStr()}  (A키 순환)` +
     (G.dead ? '\n☠ TERMINATED — R로 재시작' : '  ·  Enter=정비궤도');
 }
 
@@ -2014,6 +2143,15 @@ function currentDrain() {
   for (const [thr, r] of CFG.drainStages) { if (G.brakeTime <= thr) { rate = r; break; } }
   if (G.chassis && G.chassis.brakeDrain) return G.chassis.brakeDrain(G, rate);
   return rate;
+}
+// HUD: 장착 코어 중 첫 변이 코어의 접두/접미를 표시 (없으면 '없음')
+function affixHudStr() {
+  const c = G.slots.find(s => s && hasAffix(s));
+  if (!c) return '없음';
+  const nm = id => (AFFIX_BY_ID[id] ? AFFIX_BY_ID[id].name : '');
+  const p = c.affixes.prefix ? nm(c.affixes.prefix) : '';
+  const s = c.affixes.suffix ? nm(c.affixes.suffix) : '';
+  return (p + ' ' + s).trim() + (isNegAffix(c.affixes) ? ' ⚠저주' : '');
 }
 
 //============================================================================
