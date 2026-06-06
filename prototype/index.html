@@ -306,6 +306,21 @@ function setAffixes(core, spec) {
   applyChassisToCore(core); // 스탯/플래그 즉시 반영
   return core;
 }
+// 단일 슬롯(prefix|suffix)만 부착(나머지 보존). 유형C 모듈 보상이 대상 코어에 적용.
+function addAffix(core, slot, id) {
+  const a = core.affixes ? { ...core.affixes } : { prefix: null, suffix: null };
+  a[slot] = id;
+  core.affixes = a;
+  applyChassisToCore(core);
+  return core;
+}
+// 보상 풀용 Affix 모듈 1개(양수 접두 또는 접미). 마이너스는 딥웹 저주 전용이라 제외.
+function rollAffixModule() {
+  const usePrefix = Math.random() < 0.5;
+  const pool = usePrefix ? AFFIX_PREFIX : AFFIX_SUFFIX;
+  const id = pool[(Math.random() * pool.length) | 0];
+  return { slot: usePrefix ? 'prefix' : 'suffix', id, name: AFFIX_BY_ID[id].name };
+}
 
 // ---- 티어별 사격 스탯 (정의서 4장: 가닥수/두께/흐름속도/사거리) -------------
 // 티어가 곧 체급. 합성으로 티어가 오르면 화력이 계단식으로 폭발 → "위상 정렬"의 의미.
@@ -671,7 +686,7 @@ function startWave(n) {
 function enterOrbit() {
   G.phase = 'orbit';
   G.braking = false; G.brakeTime = 0; G.flyIn = null;
-  G.orbitStep = 'cand'; G.selCandIdx = 0; G.selSlotIdx = 0; G.pickedCore = null; G.pickedBoost = null;
+  G.orbitStep = 'cand'; G.selCandIdx = 0; G.selSlotIdx = 0; G.pickedCore = null; G.pickedBoost = null; G.pickedAffix = null;
   G.holdT = 0; G.holdConsumed = false;
   G.orbitEnterT = G.t; // 진입 시각 — 이후 새로 시작한 누름만 확정 인정(전투 브레이크 이월 방지)
   rollCandidates();
@@ -709,16 +724,19 @@ function rollCandidates() {
     if (Math.random() < t2Chance) return { core: makeT2OfColor(col) };
     const ids = T1_BY_COLOR[col]; return { core: makeT1Id(ids[(Math.random() * ids.length) | 0]) };
   };
+  // 유형C: Affix 모듈(정의서 6.4). 부착할 코어가 있어야 하고, MVP는 웨이브 게이트(정식은 LV4 해금).
+  const affixChance = hasCore && G.wave >= 5 ? 0.18 : 0;
   const picks = [];
   for (let i = 0; i < 3; i++) {
-    if (hasCore && Math.random() < bChance) picks.push({ boost: BOOSTS[(Math.random() * BOOSTS.length) | 0] });
+    if (hasCore && Math.random() < affixChance) picks.push({ affix: rollAffixModule() });
+    else if (hasCore && Math.random() < bChance) picks.push({ boost: BOOSTS[(Math.random() * BOOSTS.length) | 0] });
     else picks.push(mkCore(i));
   }
-  // 빈 슬롯 있는데 전부 B면 하나를 코어로 (3.6 ④)
-  if (hasEmpty && picks.every(p => p.boost)) picks[0] = mkCore(0);
+  // 빈 슬롯 있는데 전부 비코어(B/C)면 하나를 코어로 (3.6 ④)
+  if (hasEmpty && picks.every(p => p.boost || p.affix)) picks[0] = mkCore(0);
   const base = rand(0, TAU);
   G.candidates = picks.map((p, i) => ({
-    core: p.core || null, boost: p.boost || null,
+    core: p.core || null, boost: p.boost || null, affix: p.affix || null,
     ang: base + i / 3 * TAU, r: CFG.candidateR, taken: false, bob: rand(0, TAU),
   }));
 }
@@ -750,11 +768,15 @@ function orbitConfirm() {
     const cand = G.candidates[G.selCandIdx];
     if (cand.boost) {
       // 유형B: 스탯 오버클록 → 대상 코어 선택 단계로
-      G.pickedBoost = cand.boost; G.pickedCore = null;
+      G.pickedBoost = cand.boost; G.pickedCore = null; G.pickedAffix = null;
+      G.orbitStep = 'boost'; G.selSlotIdx = 0;
+    } else if (cand.affix) {
+      // 유형C: Affix 모듈 → 대상 코어 선택 단계로(유형B 흐름 재사용)
+      G.pickedAffix = cand.affix; G.pickedBoost = null; G.pickedCore = null;
       G.orbitStep = 'boost'; G.selSlotIdx = 0;
     } else {
       // 유형A: 코어 → 대상 빈 슬롯 선택. 합성되는 슬롯 우선 제안.
-      G.pickedCore = cand.core; G.pickedBoost = null;
+      G.pickedCore = cand.core; G.pickedBoost = null; G.pickedAffix = null;
       G.orbitStep = 'slot';
       const elig = eligibleSlots(); G.selSlotIdx = 0;
       for (let k = 0; k < elig.length; k++) {
@@ -764,11 +786,19 @@ function orbitConfirm() {
     }
     spawnRipple(CX, CY, '#ffe08a', 26);
   } else if (G.orbitStep === 'boost') {
-    // 스탯 강화 확정 → 대상 코어에 적용 후 종료
+    // 강화/Affix 확정 → 대상 코어에 적용 후 종료 (유형 B/C 공용 대상선택)
     const slot = boostableSlots()[G.selSlotIdx];
     if (slot != null && G.slots[slot]) {
-      G.pickedBoost.apply(G.slots[slot]);
-      G.lastResultSlot = slot; G.mergeFx = { slot, color: G.slots[slot].color, tier: 0, t: 0, dur: 0.4 };
+      const tc = G.slots[slot];
+      if (G.pickedAffix) { // 유형C: Affix 모듈 부착
+        addAffix(tc, G.pickedAffix.slot, G.pickedAffix.id);
+        pushToast(G.pickedAffix.name, null, isNegAffix(tc.affixes) ? '#ff5560' : '#ffe08a');
+      } else { // 유형B: 스탯 오버클록
+        G.pickedBoost.apply(tc);
+        pushToast('강화 ' + G.pickedBoost.name, tc.behavior, tc.color);
+      }
+      const fxCol = G.pickedAffix ? '#ffe08a' : tc.color;
+      G.lastResultSlot = slot; G.mergeFx = { slot, color: fxCol, tier: 0, t: 0, dur: 0.4 };
       const a = slotAngle(slot);
       spawnRipple(CX + Math.cos(a) * CFG.orbitR, CY + Math.sin(a) * CFG.orbitR, '#ffe08a', 30);
     }
@@ -789,6 +819,7 @@ function finishAbsorb() {
   const f = G.flyIn; G.flyIn = null;
   G.candidates = []; // 나머지 후보 정리
   G.slots[f.slot] = f.core; // 흡수한 코어 장착(빈칸/덮어쓰기)
+  pushToast(f.core.label, f.core.behavior, f.core.color); // SF 토스트: 획득 코어 이름
   // 압축 단계 계획 (clone으로 계산 → G.slots는 단계별로 적용)
   const clone = cloneSlots(G.slots);
   const plan = planCompression(clone, f.slot);
@@ -813,6 +844,7 @@ function applyMergeStep(step) {
   // 기체 압축 훅 (정의서 8장): 광랜=연사 복리 스택, 딥웹=무작위 룰렛(대박/중간/저주)
   const ch = G.chassis;
   if (ch && ch.onCompressionSuccess) ch.onCompressionSuccess(G, step.result, step);
+  pushToast(step.result.label, step.result.behavior, step.result.color); // SF 토스트: 합성 결과 이름
   const tier = step.result.tier;
   const a = slotAngle(step.basePos);
   const px = CX + Math.cos(a) * CFG.orbitR, py = CY + Math.sin(a) * CFG.orbitR;
@@ -1030,6 +1062,13 @@ function fireSlot(i) {
 
 function spawnRipple(x, y, color, r) {
   G.particles.push({ ripple: true, x, y, r0: r * .3, r: r, life: .35, max: .35, color });
+}
+
+// SF 알림 토스트 — 획득/합성/Affix 부착 시 '이름'을 짧게(설명문 X, 템포 보존). 정의서 1장 텍스트리스 재해석.
+function pushToast(name, behavior, color) {
+  if (!G.toasts) G.toasts = [];
+  G.toasts.push({ name, behavior: behavior || null, color: color || '#7fe9ff', t: 0, dur: 1.6 });
+  while (G.toasts.length > 4) G.toasts.shift();
 }
 
 //============================================================================
@@ -1251,6 +1290,9 @@ function update(dt) {
     if (!p.ripple) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; }
   }
   G.particles = G.particles.filter(p => p.life > 0);
+
+  // SF 토스트 수명
+  if (G.toasts && G.toasts.length) { for (const t of G.toasts) t.t += dt; G.toasts = G.toasts.filter(t => t.t < t.dur); }
 
   // 사거리 끝(명중 없이) 처리: area=장판 / burst=산탄 폭발 / hold=중력장
   for (const b of G.bullets) {
@@ -1596,9 +1638,55 @@ function drawBoostIcon(x, y, alpha, scale) {
   ctx.moveTo(x - r * 0.45, y - r * 0.1); ctx.lineTo(x, y - r * 0.55); ctx.lineTo(x + r * 0.45, y - r * 0.1); ctx.stroke();
   ctx.restore();
 }
+// 유형C(Affix 모듈) 후보 아이콘 — 육각 칩 + 역회전 점선 헤일로 + 접두/접미 핍
+function drawAffixModuleIcon(x, y, affix, alpha, scale) {
+  const sc = scale == null ? 1 : scale, al = alpha == null ? 1 : alpha, r = 9 * sc;
+  const a = AFFIX_BY_ID[affix.id];
+  const col = (a && a.kind === 'neg') ? '#ff5560' : '#ffe08a';
+  ctx.save(); ctx.strokeStyle = col; ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 12 * sc;
+  ctx.globalAlpha = al; ctx.lineWidth = 1.8 * sc;
+  ctx.beginPath();
+  for (let k = 0; k < 6; k++) { const aa = k / 6 * TAU - Math.PI / 2; const px = x + Math.cos(aa) * r, py = y + Math.sin(aa) * r; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+  ctx.closePath(); ctx.stroke();
+  ctx.globalAlpha = al * (0.5 + 0.3 * Math.abs(Math.sin(G.t * 3))); ctx.setLineDash([3 * sc, 3 * sc]); ctx.lineWidth = 1.2 * sc;
+  const rot = -G.t * 1.1; ctx.beginPath(); ctx.arc(x, y, r * 1.5, rot, rot + TAU); ctx.stroke(); ctx.setLineDash([]);
+  ctx.globalAlpha = al;
+  const pip = (px, py) => { ctx.beginPath(); ctx.moveTo(px, py - 2.4 * sc); ctx.lineTo(px + 2.4 * sc, py); ctx.lineTo(px, py + 2.4 * sc); ctx.lineTo(px - 2.4 * sc, py); ctx.closePath(); ctx.fill(); };
+  if (affix.slot === 'prefix') pip(x - r * 1.05, y - r * 1.05); else pip(x + r * 1.05, y - r * 1.05);
+  ctx.restore();
+}
 function drawCandidate(x, y, c, alpha, scale) {
   if (c.core) drawCoreGlyph(x, y, c.core, alpha, scale);
+  else if (c.affix) drawAffixModuleIcon(x, y, c.affix, alpha, scale);
   else drawBoostIcon(x, y, alpha, scale);
+}
+
+// SF 알림 토스트 렌더 — 기체 위쪽에 짧게(이름+거동 글리프). 글리치 인 → 홀드 → 페이드 아웃.
+function drawToasts() {
+  if (!G.toasts || !G.toasts.length) return;
+  ctx.save();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = '600 15px ui-monospace, Consolas, monospace';
+  for (let i = 0; i < G.toasts.length; i++) {
+    const t = G.toasts[i];
+    const p = t.t / t.dur;
+    let alpha = p < 0.12 ? p / 0.12 : p > 0.72 ? (1 - p) / 0.28 : 1; // 인/홀드/아웃
+    alpha = clamp(alpha, 0, 1);
+    const jit = p < 0.16 ? rand(-2.5, 2.5) : 0;                       // 글리치 인 흔들림
+    const yy = CY - 104 - (G.toasts.length - 1 - i) * 30;             // 최신이 기체에 가깝게(아래)
+    const hasGlyph = !!t.behavior;
+    const padL = hasGlyph ? 30 : 14;
+    const bw = ctx.measureText(t.name).width + padL + 14;
+    const x0 = CX - bw / 2 + jit;
+    ctx.globalAlpha = alpha * 0.72; ctx.fillStyle = 'rgba(8,12,18,0.9)';
+    ctx.fillRect(x0, yy - 13, bw, 26);
+    ctx.globalAlpha = alpha; ctx.strokeStyle = t.color; ctx.lineWidth = 1.3;
+    ctx.shadowColor = t.color; ctx.shadowBlur = 10; ctx.strokeRect(x0, yy - 13, bw, 26);
+    if (hasGlyph) { ctx.save(); ctx.fillStyle = t.color; ctx.strokeStyle = t.color; ctx.lineWidth = 2; ctx.shadowBlur = 6; drawCoreShape(x0 + 15, yy, 7, t.behavior); ctx.restore(); }
+    ctx.fillStyle = '#e8fbff'; ctx.shadowColor = t.color; ctx.shadowBlur = 6;
+    ctx.fillText(t.name, x0 + padL, yy + 1);
+  }
+  ctx.restore();
 }
 
 // 정비 궤도 레이어: 2단계 이산 선택 (후보 → 슬롯/강화) + 고스트 프리뷰 + flyIn + 압축 슬라이드
@@ -2096,6 +2184,9 @@ function render() {
     ctx.restore();
   }
 
+  // --- SF 알림 토스트 (이름 + 거동 글리프, 글리치 인/페이드 아웃) ---
+  drawToasts();
+
   // --- HUD (프로토타입 디버그용) ---
   // HP 바: 좌상단 네온 막대 (게임 본편엔 없지만 테스터 가독성)
   ctx.save();
@@ -2118,7 +2209,9 @@ function render() {
   // 회전 방향 / 페이즈 / 슬롯 구성
   const slotStr = G.slots.map((c, i) => !isUnlocked(i) ? '✕' : (c ? ('T' + c.tier) : '·')).join(' ');
   const sc = G.candidates[G.selCandIdx];
-  const candLabel = sc ? (sc.boost ? '스탯 강화 ' + sc.boost.name : sc.core.label + (sc.core.fx ? ' (' + sc.core.fx + ')' : '')) : '';
+  const candLabel = !sc ? '' : sc.boost ? '스탯 강화 ' + sc.boost.name
+    : sc.affix ? 'Affix 모듈 ' + sc.affix.name + (sc.affix.slot === 'prefix' ? '(접두)' : '(접미)')
+    : sc.core.label + (sc.core.fx ? ' (' + sc.core.fx + ')' : '');
   hud.textContent =
     `WAVE ${G.wave}  |  KILL ${G.score}  |  NOVA×${G.novaCount}` +
     `\nROT ${G.dir > 0 ? '↻ 시계' : '↺ 반시계'}` +

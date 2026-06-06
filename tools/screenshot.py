@@ -48,6 +48,20 @@ SHOTS = [
         if (!G.slots[0]) G.slots[0] = makeT1Id('streamPing');
         setAffixes(G.slots[0], { suffix: 'ddos' });
     }"""),
+    ("8_orbit_affix_module.png", "정비궤도 유형C Affix 모듈 후보", """() => {
+        setChassisIndex(0);
+        if (!G.slots[0]) G.slots[0] = makeT1Id('streamPing');
+        enterOrbit();
+        G.candidates[0] = { core:null, boost:null, affix:{slot:'prefix',id:'giant',name:'거대한'}, ang:0, r:CFG.candidateR, taken:false, bob:0 };
+        G.candidates[1] = { core:null, boost:null, affix:{slot:'suffix',id:'crit',name:'치명적인'}, ang:2.1, r:CFG.candidateR, taken:false, bob:0 };
+        G.selCandIdx = 0;
+    }"""),
+    ("9_sf_toast.png", "SF 알림 토스트 (이름+거동 글리프)", """() => {
+        setChassisIndex(0);
+        G.toasts = [];
+        pushToast('스트리밍(T2)', 'straight', '#7fe9ff');
+        pushToast('거대한', null, '#ffe08a');
+    }"""),
 ]
 
 

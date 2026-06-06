@@ -116,6 +116,33 @@ DRIVE_JS = r"""
       if (!isNegAffix(b.affixes)) throw new Error("curse는 neg여야");
     });
 
+    // 유형C 모듈: addAffix는 단일 슬롯만 설정(나머지 보존), rollAffixModule은 양수만
+    step("affix-module", () => {
+      const c = makeT1Id("streamPing");
+      addAffix(c, "prefix", "giant"); addAffix(c, "suffix", "crit");
+      if (c.affixes.prefix !== "giant" || c.affixes.suffix !== "crit") throw new Error("addAffix 슬롯 보존 실패");
+      for (let i = 0; i < 20; i++) { const m = rollAffixModule();
+        if (!AFFIX_BY_ID[m.id] || AFFIX_BY_ID[m.id].kind === "neg") throw new Error("모듈 보상에 마이너스/무효"); }
+    });
+
+    // 유형C 보상 흐름: 후보→대상선택(boost단계)→부착 (orbitConfirm 경로)
+    step("affix-reward-flow", () => {
+      if (!G.slots.some(c => c)) G.slots[0] = makeT1Id("streamPing");
+      enterOrbit();
+      G.candidates[0] = { core: null, boost: null, affix: rollAffixModule(), ang: 0, r: CFG.candidateR, taken: false, bob: 0 };
+      G.selCandIdx = 0;
+      orbitConfirm();
+      if (G.orbitStep !== "boost") throw new Error("affix 후보 확정→대상선택 단계 실패");
+      orbitConfirm();
+      if (!G.slots.some(hasAffix)) throw new Error("affix 모듈 부착 실패");
+    });
+
+    // SF 토스트
+    step("toast", () => {
+      G.toasts = []; pushToast("스트리밍(T2)", "straight", "#7fe9ff");
+      if (!G.toasts.length) throw new Error("pushToast 실패");
+    });
+
     // 정상 상태로 리셋(라이브 구동이 정상 경로도 돌도록)
     step("reset", () => { setChassisIndex(0); newGame(); });
   } catch (e) {
