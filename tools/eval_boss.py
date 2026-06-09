@@ -30,9 +30,9 @@ COLLECT = r"""
     const order = SLOT_UNLOCK_ORDER.slice(0, slots);
     for (let i = 0; i < order.length; i++) {
       const t = tiers[i], c = COLS[i % 4];
-      let core;
+      let core; // 결정적 코어(RNG 제거 — 재현 가능한 TTK)
       if (t === 'T3') core = makeCore(3, [c, COLS[(i + 1) % 4]]);
-      else if (t === 'T2') core = makeT2OfColor(c);
+      else if (t === 'T2') core = makeT2FromIds(T1_BY_COLOR[c][0], T1_BY_COLOR[c][0]);
       else core = makeT1Id(T1_BY_COLOR[c][0]);
       G.slots[order[i]] = core;
     }

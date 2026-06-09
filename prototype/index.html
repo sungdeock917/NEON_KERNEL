@@ -1178,9 +1178,9 @@ function doSpawn(ang, def) {
 //============================================================================
 const BOSS_WAVES = { 10: 'walle', 20: 'antiv', 30: 'panic' };
 const BOSS_DEF = {
-  walle: { name: 'WALL_E',       hp: 140, r: 34, color: '#ff9a5a' }, // 방화벽 게이트: 3 회전방패
+  walle: { name: 'WALL_E',       hp: 100, r: 38, color: '#ff9a5a' }, // 방화벽 게이트: 3 회전방패(섹터1 학습 — 틈 넓고 표적 큼)
   antiv: { name: 'ANTI_V',       hp: 250, r: 30, color: '#7affc0' }, // 오염 백신: 포탑 스폰 + 에러블록
-  panic: { name: 'KERNEL_PANIC', hp: 520, r: 0,  color: '#ff5d54' }, // 신경망 붕괴: 테두리=HP, 4속성 물량
+  panic: { name: 'KERNEL_PANIC', hp: 2600, r: 0, color: '#ff5d54' }, // 신경망 붕괴: 테두리=HP(스프레이 화력쇼) — 클라이맥스 길이
 };
 function bossBorderR() { return Math.min(W, H) * 0.43; }
 
@@ -1213,7 +1213,7 @@ function updateWalle(b, dt) {
     G.ebullets.push({ x: b.x, y: b.y, vx: Math.cos(toC) * 200, vy: Math.sin(toC) * 200, life: 5, r: 6 });
   }
 }
-const WALLE_ARC = 1.0; // 방패 호폭(rad) ~57°, 3개 → 171° 가림 / 189° 틈
+const WALLE_ARC = 0.7; // 방패 호폭(rad) ~40°, 3개 → 120° 가림 / 240° 틈(섹터1 학습: 틈 넓게)
 function walleBlocks(b, ang) {
   for (let k = 0; k < 3; k++) { if (angDiff(ang, b.shieldRot + k / 3 * TAU) < WALLE_ARC / 2) return true; }
   return false;
