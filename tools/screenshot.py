@@ -65,6 +65,19 @@ SHOTS = [
         G.selCandIdx = 0;
         setAimToast(G.candidates[0]); G.aimToast.t = 0.3;
     }"""),
+    ("B1_walle.png", "보스 WALL_E (3 회전 방패)", """() => {
+        startWave(10); G.boss.hp = G.boss.hpMax * 0.7;
+    }"""),
+    ("B2_antiv.png", "보스 ANTI_V (포탑 + 에러블록)", """() => {
+        startWave(20); G.boss.hp = G.boss.hpMax * 0.6;
+        G.boss.blocks.push({ang: 1.0, life: 4, max: 4});
+        G.boss.blocks.push({ang: 3.4, life: 4, max: 4});
+        doSpawn(0.6, ENEMY.shooter); doSpawn(2.5, ENEMY.shooter);
+    }"""),
+    ("B3_panic.png", "보스 KERNEL_PANIC (테두리=HP + 물량)", """() => {
+        startWave(30); G.boss.hp = G.boss.hpMax * 0.55;
+        for (let i = 0; i < 8; i++) doSpawn(i / 8 * Math.PI * 2, i % 2 ? ENEMY.runner : ENEMY.bouncer);
+    }"""),
 ]
 
 # 아웃게임(메타) 화면 — 게임 진입 없이 씬만 전환 (이름 M_ 접두로 구분)

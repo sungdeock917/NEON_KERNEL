@@ -632,6 +632,9 @@ function newGame() {
     particles: [],
     puddles: [],         // 에어리어 장판 (area 코어)
     shock: null,         // 노바 충격파
+    boss: null,          // 보스 엔티티 (정의서 11.1)
+    superOrbit: false,   // 슈퍼 정비궤도 모드
+    orbitPicksLeft: 1,   // 이번 정비궤도 남은 픽 수
     wave: 0,
     waveActive: false,
     waveBudgetLeft: 0,
@@ -687,6 +690,7 @@ function exitBench() { G.bench = false; newGame(); }
 
 function startWave(n) {
   G.wave = n;
+  if (BOSS_WAVES[n]) { spawnBoss(BOSS_WAVES[n]); G.waveBudgetLeft = 0; G.waveActive = true; G.spawnTimer = 999; return; } // 보스전
   const budget = WAVE_BUDGET[Math.min(n - 1, WAVE_BUDGET.length - 1)] + Math.max(0, n - WAVE_BUDGET.length) * 3;
   G.waveBudgetLeft = budget;
   G.waveActive = true;
@@ -696,8 +700,10 @@ function startWave(n) {
 //============================================================================
 // 정비 궤도 (코어 획득·합성) — 정의서 3.1~3.5
 //============================================================================
-function enterOrbit() {
+function enterOrbit(superMode) {
   G.phase = 'orbit';
+  G.superOrbit = !!superMode;          // 슈퍼 정비궤도(중간 보스 보상, 3.7): 후보 6개·2픽 연속
+  G.orbitPicksLeft = superMode ? 2 : 1;
   G.braking = false; G.brakeTime = 0; G.flyIn = null;
   G.orbitStep = 'cand'; G.selCandIdx = 0; G.selSlotIdx = 0; G.pickedCore = null; G.pickedBoost = null; G.pickedAffix = null;
   G.holdT = 0; G.holdConsumed = false;
@@ -740,8 +746,9 @@ function rollCandidates() {
   // 유형C: Affix 모듈(정의서 6.4). 등장·부착 모두 T3 한정(사용자 확정 — T3 천장 이후 강화 영역).
   const hasT3 = G.slots.some(c => c && c.tier === 3);
   const affixChance = hasT3 ? 0.22 : 0;
+  const nCand = G.superOrbit ? 6 : 3; // 슈퍼 정비궤도는 후보 6개(3.7)
   const picks = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < nCand; i++) {
     if (hasCore && Math.random() < affixChance) picks.push({ affix: rollAffixModule() });
     else if (hasCore && Math.random() < bChance) picks.push({ boost: BOOSTS[(Math.random() * BOOSTS.length) | 0] });
     else picks.push(mkCore(i));
@@ -751,7 +758,7 @@ function rollCandidates() {
   const base = rand(0, TAU);
   G.candidates = picks.map((p, i) => ({
     core: p.core || null, boost: p.boost || null, affix: p.affix || null,
-    ang: base + i / 3 * TAU, r: CFG.candidateR, taken: false, bob: rand(0, TAU),
+    ang: base + i / nCand * TAU, r: CFG.candidateR, taken: false, bob: rand(0, TAU),
   }));
   setAimToast(G.candidates[G.selCandIdx] || G.candidates[0]); // 조준 팝업: 현재 향한 보상
 }
@@ -899,10 +906,19 @@ function updateMerge(dt) {
   }
 }
 
-// 모든 압축 종료 → 다음 웨이브 (정의서: 일반 궤도는 3선택 중 1개)
+// 한 픽 종료 → (슈퍼 정비궤도면 다음 픽) → 아니면 다음 웨이브
 function finishMerge() {
   clearAimToast();
-  G.mergeQueue = []; G.mergeStep = null; G.merging = false; G.candidates = [];
+  G.mergeQueue = []; G.mergeStep = null; G.merging = false;
+  if (G.superOrbit && G.orbitPicksLeft > 1) { // 슈퍼 정비궤도: 2픽 연속(3.7)
+    G.orbitPicksLeft--;
+    G.orbitStep = 'cand'; G.selCandIdx = 0; G.selSlotIdx = 0;
+    G.pickedCore = null; G.pickedBoost = null; G.pickedAffix = null;
+    G.holdConsumed = false; G.holdT = 0; G.orbitEnterT = G.t;
+    rollCandidates(); // 남은 픽을 위한 새 후보 6개
+    return;
+  }
+  G.superOrbit = false; G.candidates = [];
   G.phase = 'combat';
   G.hp = clamp(G.hp + CFG.hpRecoverWaveClear, 0, G.hpMax); // 웨이브 클리어 회복(정의서 2.1)
   G.interWave = 0.8;
@@ -1026,6 +1042,13 @@ function fireNova() {
   for (const en of G.enemies) {
     if (Math.hypot(en.x - CX, en.y - CY) < CFG.novaRadius) en.hp = -999;
   }
+  // 보스에도 큰 피해 (정의서 8.1: 글리치 노바=보스 페이즈 전환 저격). 방패 무시.
+  if (G.boss) {
+    const nd = G.boss.kind === 'panic' ? 18 : 34;
+    if (G.boss.kind === 'panic' || Math.hypot((G.boss.x || CX) - CX, (G.boss.y || CY) - CY) < CFG.novaRadius + G.boss.r) {
+      G.boss.hit = 0.1; G.boss.hp -= nd; if (G.boss.hp <= 0) killBoss();
+    }
+  }
   G.ebullets.length = 0;
   for (let i = 0; i < 60; i++) {
     const a = rand(0, TAU);
@@ -1148,6 +1171,181 @@ function doSpawn(ang, def) {
   // 바운서는 목표 궤도 반경 지정
   if (def.kind === 'bouncer') e.targetR = rand(170, 240);
   G.enemies.push(e);
+}
+
+//============================================================================
+// 보스 (정의서 11.1) — 섹터별 중간/최종 보스
+//============================================================================
+const BOSS_WAVES = { 10: 'walle', 20: 'antiv', 30: 'panic' };
+const BOSS_DEF = {
+  walle: { name: 'WALL_E',       hp: 140, r: 34, color: '#ff9a5a' }, // 방화벽 게이트: 3 회전방패
+  antiv: { name: 'ANTI_V',       hp: 250, r: 30, color: '#7affc0' }, // 오염 백신: 포탑 스폰 + 에러블록
+  panic: { name: 'KERNEL_PANIC', hp: 520, r: 0,  color: '#ff5d54' }, // 신경망 붕괴: 테두리=HP, 4속성 물량
+};
+function bossBorderR() { return Math.min(W, H) * 0.43; }
+
+function spawnBoss(kind) {
+  const d = BOSS_DEF[kind];
+  const hp = Math.round(d.hp * (kind === 'panic' ? 1 : hpScale(G.wave) * 0.85));
+  G.boss = { kind, name: d.name, color: d.color, r: d.r, hp, hpMax: hp, t: 0, phase: 1, hit: 0,
+    x: CX, y: CY - 150, ang: -Math.PI / 2, fireT: 1.6, spawnT: 2.2, shieldRot: 0, blocks: [] };
+  G.shake = 14;
+}
+
+function updateBoss(dt) {
+  const b = G.boss; if (!b) return;
+  b.t += dt; if (b.hit > 0) b.hit -= dt;
+  if (b.kind === 'walle') updateWalle(b, dt);
+  else if (b.kind === 'antiv') updateAntiv(b, dt);
+  else if (b.kind === 'panic') updatePanic(b, dt);
+  if (b.phase === 1 && b.hp <= b.hpMax * 0.5) { b.phase = 2; G.shake = Math.max(G.shake, 12); } // 페이즈 전환(8.1 노바 저격 창)
+  if (b.hp <= 0) killBoss();
+}
+
+// WALL_E — 공전 + 3 회전 방패. 방패 호에 막힌 탄은 무효, 틈으로 쏴야 피해.
+function updateWalle(b, dt) {
+  b.ang += 0.28 * dt;
+  const R = 185; b.x = CX + Math.cos(b.ang) * R; b.y = CY + Math.sin(b.ang) * R;
+  b.shieldRot += (b.phase === 2 ? 1.7 : 0.95) * dt;
+  b.fireT -= dt;
+  if (b.fireT <= 0) { b.fireT = b.phase === 2 ? 1.3 : 2.1;
+    const toC = Math.atan2(CY - b.y, CX - b.x);
+    G.ebullets.push({ x: b.x, y: b.y, vx: Math.cos(toC) * 200, vy: Math.sin(toC) * 200, life: 5, r: 6 });
+  }
+}
+const WALLE_ARC = 1.0; // 방패 호폭(rad) ~57°, 3개 → 171° 가림 / 189° 틈
+function walleBlocks(b, ang) {
+  for (let k = 0; k < 3; k++) { if (angDiff(ang, b.shieldRot + k / 3 * TAU) < WALLE_ARC / 2) return true; }
+  return false;
+}
+
+// ANTI_V — 상단 부유, 포탑 미니언 주기 스폰 + 조준 방향에 에러블록(그 각도 탄 차단).
+function updateAntiv(b, dt) {
+  b.x = CX + Math.sin(b.t * 0.5) * 165; b.y = CY - 155;
+  b.spawnT -= dt;
+  if (b.spawnT <= 0) { b.spawnT = b.phase === 2 ? 2.8 : 4.2;
+    const n = b.phase === 2 ? 2 : 1;
+    for (let i = 0; i < n; i++) doSpawn(rand(0, TAU), ENEMY.shooter);
+  }
+  b.fireT -= dt;
+  if (b.fireT <= 0) { b.fireT = b.phase === 2 ? 2.3 : 3.2;
+    b.blocks.push({ ang: G.rot, life: 4, max: 4 }); // 현재 조준(슬롯 회전)에 에러블록
+    if (b.blocks.length > 5) b.blocks.shift();
+  }
+  for (const bl of b.blocks) bl.life -= dt;
+  b.blocks = b.blocks.filter(bl => bl.life > 0);
+}
+function antivBlocks(b, ang) {
+  for (const bl of b.blocks) { if (angDiff(ang, bl.ang) < 0.30) return true; }
+  return false;
+}
+
+// KERNEL_PANIC — 테두리가 HP. 4속성 무제한 물량. 테두리에 닿는 탄이 피해.
+function updatePanic(b, dt) {
+  b.spawnT -= dt;
+  if (b.spawnT <= 0) { b.spawnT = b.phase === 2 ? 0.55 : 0.85;
+    const r = Math.random();
+    doSpawn(rand(0, TAU), r < 0.45 ? ENEMY.runner : r < 0.75 ? ENEMY.bouncer : ENEMY.shooter);
+  }
+}
+
+function killBoss() {
+  const kind = G.boss.kind, bx = G.boss.x || CX, by = G.boss.y || CY;
+  G.boss = null;
+  G.shake = 22; G.hitStop = 0.12;
+  for (let i = 0; i < 90; i++) { const a = rand(0, TAU);
+    G.particles.push({ x: bx, y: by, vx: Math.cos(a) * rand(120, 540), vy: Math.sin(a) * rand(120, 540),
+      life: rand(.4, 1), max: 1, color: i % 3 ? '#ffd66e' : '#fff', r: rand(2, 5) }); }
+  G.enemies.length = 0; G.ebullets.length = 0; G.warnings.length = 0; // 잔여 정리
+  if (kind === 'panic') { endGame(true); return; } // 최종 → 클리어
+  enterOrbit(true); // 중간 보스 → 슈퍼 정비궤도(3.7)
+}
+
+// 보스 렌더 — 텍스트 제로(네온 형태/HP바/테두리)
+function drawBoss() {
+  const b = G.boss; if (!b) return;
+  if (b.kind === 'panic') { // 테두리 = HP
+    const BR = bossBorderR(), frac = clamp(b.hp / b.hpMax, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = 0.15; ctx.lineWidth = 4; ctx.strokeStyle = b.color; ctx.shadowColor = b.color; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(CX, CY, BR, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = 0.85 + 0.15 * Math.abs(Math.sin(G.t * 6)); ctx.lineWidth = 9; ctx.shadowBlur = 22;
+    ctx.beginPath(); ctx.arc(CX, CY, BR, -Math.PI / 2, -Math.PI / 2 + frac * TAU); ctx.stroke();
+    ctx.restore(); return;
+  }
+  ctx.save(); ctx.translate(b.x, b.y);
+  ctx.strokeStyle = b.hit > 0 ? '#fff' : b.color; ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 3;
+  ctx.shadowColor = b.color; ctx.shadowBlur = 16;
+  ctx.beginPath();
+  for (let k = 0; k < 6; k++) { const a = k / 6 * TAU + b.t * 0.3; const px = Math.cos(a) * b.r, py = Math.sin(a) * b.r; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(0, 0, b.r * 0.35, 0, TAU); ctx.fill();
+  ctx.restore();
+  if (b.kind === 'walle') { // 3 회전 방패 호
+    ctx.save(); ctx.strokeStyle = '#9aa6c0'; ctx.lineWidth = 6; ctx.shadowColor = '#cdd6df'; ctx.shadowBlur = 10; ctx.globalAlpha = 0.85;
+    for (let k = 0; k < 3; k++) { const ca = b.shieldRot + k / 3 * TAU; ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 14, ca - WALLE_ARC / 2, ca + WALLE_ARC / 2); ctx.stroke(); }
+    ctx.restore();
+  }
+  if (b.kind === 'antiv') { // 에러블록 (기체 둘레 링 위 글리치 호)
+    ctx.save();
+    for (const bl of b.blocks) { const a = clamp(bl.life / bl.max, 0, 1);
+      ctx.globalAlpha = 0.35 + 0.45 * a; ctx.strokeStyle = '#7affc0'; ctx.lineWidth = 8; ctx.shadowColor = '#7affc0'; ctx.shadowBlur = 8;
+      ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.arc(CX, CY, 115, bl.ang - 0.30, bl.ang + 0.30); ctx.stroke(); ctx.setLineDash([]); }
+    ctx.restore();
+  }
+  // 보스 HP 바 (상단 중앙 네온 바)
+  const frac = clamp(b.hp / b.hpMax, 0, 1), bw = Math.min(W * 0.5, 420), bx = CX - bw / 2, by = 24;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(bx, by, bw, 7);
+  ctx.fillStyle = b.color; ctx.shadowColor = b.color; ctx.shadowBlur = 10; ctx.fillRect(bx, by, bw * frac, 7);
+  ctx.restore();
+}
+
+// 플레이어 탄/빔/노바 vs 보스 (방패·에러블록·테두리 처리)
+function collideBoss(dt) {
+  const b = G.boss; if (!b) return;
+  if (b.kind === 'panic') {
+    const BR = bossBorderR();
+    for (const bu of G.bullets) {
+      if (bu.life <= 0) continue;
+      if (bu.behavior === 'beam') {
+        const ex = bu.x + Math.cos(bu.angle) * bu.range, ey = bu.y + Math.sin(bu.angle) * bu.range;
+        if (Math.hypot(ex - CX, ey - CY) > BR) { b.hp -= bu.dmgps * dt; b.hit = 0.05; }
+        continue;
+      }
+      if (Math.hypot(bu.x - CX, bu.y - CY) > BR) { b.hp -= (bu.dmg || 1); b.hit = 0.05; bu.life = -1; spawnRipple(bu.x, bu.y, b.color, 14); }
+    }
+    return;
+  }
+  for (const bu of G.bullets) {
+    if (bu.life <= 0) continue;
+    if (bu.behavior === 'beam') {
+      const dx = Math.cos(bu.angle), dy = Math.sin(bu.angle);
+      const rx = b.x - bu.x, ry = b.y - bu.y, proj = rx * dx + ry * dy;
+      if (proj < 0 || proj > bu.range) continue;
+      if (Math.abs(rx * dy - ry * dx) < b.r) {
+        if (b.kind === 'walle' && walleBlocks(b, Math.atan2(CY - b.y, CX - b.x))) continue; // 빔은 중앙에서 접근
+        b.hp -= bu.dmgps * dt; b.hit = 0.05;
+      }
+      continue;
+    }
+    if ((bu.x - b.x) ** 2 + (bu.y - b.y) ** 2 < (b.r + bu.r) ** 2) {
+      const ang = Math.atan2(bu.y - b.y, bu.x - b.x); // 보스 중심 기준 접근각
+      if (b.kind === 'walle' && walleBlocks(b, ang)) { bu.life = -1; spawnRipple(bu.x, bu.y, '#9aa6c0', 8); continue; }
+      b.hp -= (bu.dmg || 1) * (bu.crit && Math.random() < bu.crit.chance ? bu.crit.mult : 1); b.hit = 0.05;
+      spawnRipple(bu.x, bu.y, b.color, 12);
+      if ((bu.pierce || 0) > 0) bu.pierce--; else bu.life = -1;
+    }
+  }
+  // ANTI_V 에러블록: 기체 둘레 링(반경 95~135)에서 해당 각도 플레이어 탄 차단
+  if (b.kind === 'antiv' && b.blocks.length) {
+    for (const bu of G.bullets) {
+      if (bu.life <= 0 || bu.behavior === 'beam') continue;
+      const d = Math.hypot(bu.x - CX, bu.y - CY);
+      if (d < 92 || d > 138) continue;
+      if (antivBlocks(b, Math.atan2(bu.y - CY, bu.x - CX))) { bu.life = -1; spawnRipple(bu.x, bu.y, '#7affc0', 8); }
+    }
+  }
 }
 
 //============================================================================
@@ -1317,7 +1515,10 @@ function update(dt) {
   }
   G.puddles = G.puddles.filter(p => p.life > 0);
 
+  if (G.boss) updateBoss(dt); // 보스 기믹/이동
+
   collide(dt);
+  if (G.boss) collideBoss(dt); // 플레이어 탄/빔 vs 보스
 
   // 충격파
   if (G.shock) {
@@ -1368,8 +1569,8 @@ function update(dt) {
           rollSpawn();
           G.spawnTimer = rand(0.5, 1.1) - Math.min(0.3, G.wave * 0.02);
         }
-      } else if (G.enemies.length === 0 && G.warnings.length === 0) {
-        // 웨이브 클리어 → 정비 궤도(코어 획득·합성) 진입 (정의서 3.1)
+      } else if (!G.boss && G.enemies.length === 0 && G.warnings.length === 0) {
+        // 웨이브 클리어 → 정비 궤도(코어 획득·합성) 진입 (정의서 3.1). 보스 생존 중엔 대기.
         enterOrbit();
       }
     } else {
@@ -1943,6 +2144,9 @@ function render() {
     }
     ctx.restore();
   }
+
+  // --- 보스 ---
+  drawBoss();
 
   // --- 아군 탄 — 코어(메커니즘)별로 다른 모양 ---
   ctx.save(); ctx.shadowBlur = 8;

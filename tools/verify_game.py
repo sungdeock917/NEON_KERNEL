@@ -29,7 +29,7 @@ DRIVE_JS = r"""
   const step = (where, fn) => { try { fn(); log.push("OK   "+where); }
     catch(e){ log.push("FAIL "+where+": "+(e&&e.stack||e)); throw Object.assign(new Error(where+": "+e), {where}); } };
   try {
-    step("boot", () => { newGame(); }); // 아웃게임 도입으로 로드 시 G 미생성 → 먼저 부팅
+    step("boot", () => { try { localStorage.clear(); } catch (e) {} SAVE = defaultSave(); newGame(); }); // 결정성 위해 SAVE 초기화 + 부팅
     step("globals-present", () => {
       for (const n of ["G","CHASSIS","setChassisIndex","rollDeepweb","canCompress","SAVE","goScene",
                        "applyChassisToCore","reapplyChassisToAllCores","makeT1Id","newGame","metaRunMods"]) {
@@ -187,6 +187,33 @@ DRIVE_JS = r"""
       const beam = G.bullets.find(b => b.behavior === "beam");
       // life가 발사주기(interval×1.1)에 맞아야 — 과거 고정 0.06이면 중첩 누적
       if (beam.life > c.interval * 1.2 + 1e-6) throw new Error("빔 life가 발사주기보다 김(중첩): " + beam.life);
+    });
+
+    // ===== 보스 (정의서 11.1) =====
+    step("boss-spawn-3", () => {
+      for (const [w, kind] of [[10, "walle"], [20, "antiv"], [30, "panic"]]) {
+        newGame(); startWave(w);
+        if (!G.boss || G.boss.kind !== kind) throw new Error("보스 미스폰: " + kind);
+        if (G.waveBudgetLeft !== 0) throw new Error("보스전인데 일반 예산 존재");
+        updateBoss(0.1); // 기믹 1틱(크래시 체크)
+      }
+    });
+    step("boss-walle-shield", () => {
+      newGame(); startWave(10); const b = G.boss; b.shieldRot = 0;
+      if (!walleBlocks(b, 0)) throw new Error("방패 중심인데 차단 안됨");
+      if (walleBlocks(b, Math.PI)) throw new Error("틈(π)인데 차단됨");
+    });
+    step("boss-defeat-mid-super", () => {
+      newGame(); startWave(10); G.boss.hp = 0; updateBoss(0.1);
+      if (G.boss) throw new Error("보스 미처치");
+      if (G.phase !== "orbit" || !G.superOrbit) throw new Error("중간보스 처치→슈퍼 정비궤도 아님");
+      if (G.candidates.length !== 6) throw new Error("슈퍼 후보 6개 아님: " + G.candidates.length);
+      if (G.orbitPicksLeft !== 2) throw new Error("슈퍼 픽 2 아님");
+    });
+    step("boss-defeat-final-clear", () => {
+      newGame(); startWave(30); G.boss.hp = 0; G.ended = false; updateBoss(0.1);
+      if (scene !== "result" || !lastResult.cleared) throw new Error("최종보스 처치→클리어 아님");
+      if (!SAVE.cleared) throw new Error("SAVE.cleared 미설정");
     });
 
     // ===== 아웃게임(메타) =====
