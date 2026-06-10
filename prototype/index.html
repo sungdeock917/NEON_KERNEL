@@ -644,6 +644,8 @@ function newGame() {
     dead: false,
     deadT: 0,            // 사망 후 경과(정산 자동 전환)
     ended: false,        // 정산 처리 완료 가드
+    continueUsed: false, // 이어하기 사용 여부 (판당 1회, 정의서 9.5)
+    reviveOffer: null,   // 보스전 사망 이어하기 오퍼 {t, dur}
     shake: 0,
     score: 0,
     novaCount: 0,
@@ -959,7 +961,11 @@ function pressUp() {
   if (!pressing) return;
   pressing = false;
   const held = G.t - pressStart;
-  if (G.dead) { if (G.deadT > 0.5) endGame(false); return; } // 사망 후 탭 = 정산 즉시 이동(연출 0.5s 후)
+  if (G.dead) { // 사망 중 탭
+    if (G.reviveOffer) { reviveRun(); return; }      // 이어하기 오퍼 중 탭 = 이어하기 발동 (9.5)
+    if (G.deadT > 0.5) endGame(false);               // 그 외 = 정산 즉시 이동(연출 0.5s 후)
+    return;
+  }
   // --- 정비 궤도: 이산 선택 (탁=다음 항목, 꾹=확정은 update에서 처리됨) ---
   if (G.phase === 'orbit') {
     // 진입 후 새로 시작한 누름만 탁으로 인정(이월 누름 무시)
@@ -1352,7 +1358,12 @@ function collideBoss(dt) {
 // 업데이트
 //============================================================================
 function update(dt) {
-  if (G.dead) { G.deadT += dt; if (G.deadT > 1.8) endGame(false); return; } // 사망 → 정산 자동 전환
+  if (G.dead) { // 사망 → 정산 자동 전환 (이어하기 오퍼 중엔 대기)
+    G.deadT += dt;
+    if (G.reviveOffer) { G.reviveOffer.t += dt; if (G.reviveOffer.t >= G.reviveOffer.dur) G.reviveOffer = null; return; }
+    if (G.deadT > 1.8) endGame(false);
+    return;
+  }
   G.t += dt;
 
   // 입력 → 브레이크 판정 (전투에서만): TAP_MAX 넘게 누르면 브레이크 진입
@@ -1751,13 +1762,29 @@ function hitPlayer(dmg) {
 
 function die() {
   if (G.dead) return;
-  G.dead = true;
+  G.dead = true; G.deadT = 0;
   G.shake = 18;
   for (let i = 0; i < 80; i++) {
     const a = rand(0, TAU);
     G.particles.push({ x: CX, y: CY, vx: Math.cos(a) * rand(80, 460), vy: Math.sin(a) * rand(80, 460),
       life: rand(.4, 1), max: 1, color: i % 3 ? '#ff4d54' : '#5fd9c8', r: rand(2, 5) });
   }
+  // 이어하기(9.5): 보스전 사망 + 판당 미사용 시에만 오퍼. 일반 웨이브 사망엔 적용 안 함.
+  if (G.boss && !G.continueUsed) G.reviveOffer = { t: 0, dur: 6 };
+}
+
+// 이어하기 발동 — 죽은 자리에서 체력 절반 회복 + 빌드/보스 유지, 잔여 적탄 정리, 무적 부여 (정의서 9.5)
+function reviveRun() {
+  G.continueUsed = true; G.reviveOffer = null;
+  G.dead = false; G.deadT = 0;
+  G.hp = (G.hpMax || 100) * 0.5;
+  G.iframe = 1.6; // 재개 직후 무적(즉사 방지)
+  G.braking = false; G.nova = 0; G.brakeTime = 0;
+  G.enemies.length = 0; G.ebullets.length = 0; G.warnings.length = 0; // 적 위협만 정리(보스는 유지)
+  G.shake = 16; G.flash = 0.6;
+  for (let i = 0; i < 70; i++) { const a = rand(0, TAU); // 부활 링 버스트(시안 — 사망 적색과 대비)
+    G.particles.push({ x: CX, y: CY, vx: Math.cos(a) * rand(120, 520), vy: Math.sin(a) * rand(120, 520),
+      life: rand(.4, .9), max: 1, color: i % 3 ? '#5fe9d8' : '#fff', r: rand(2, 5) }); }
 }
 
 //============================================================================
@@ -2434,11 +2461,26 @@ function render() {
   // --- 사망 오버레이 ---
   if (G.dead) {
     ctx.fillStyle = 'rgba(4,6,10,0.55)'; ctx.fillRect(0, 0, W, H);
-    ctx.save();
-    ctx.globalAlpha = 0.6 + 0.4 * Math.abs(Math.sin(G.t * 8));
-    ctx.strokeStyle = '#ff4d54'; ctx.lineWidth = 2; ctx.shadowColor = '#ff4d54'; ctx.shadowBlur = 20;
-    ctx.beginPath(); ctx.arc(CX, CY, 60, 0, TAU); ctx.stroke();
-    ctx.restore();
+    if (G.reviveOffer) {
+      // 이어하기 오퍼(9.5): 시안 부활 링 + 남은시간 게이지(시계 반대로 줄어듦) + 탭 글리프
+      const o = G.reviveOffer, left = clamp(1 - o.t / o.dur, 0, 1);
+      ctx.save(); ctx.translate(CX, CY);
+      const pulse = 0.55 + 0.45 * Math.abs(Math.sin(G.t * 5));
+      ctx.strokeStyle = '#5fe9d8'; ctx.shadowColor = '#5fe9d8';
+      ctx.globalAlpha = 0.18; ctx.lineWidth = 3; ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.arc(0, 0, 64, 0, TAU); ctx.stroke();          // 베이스 링
+      ctx.globalAlpha = pulse; ctx.lineWidth = 6; ctx.shadowBlur = 22;
+      ctx.beginPath(); ctx.arc(0, 0, 64, -Math.PI / 2, -Math.PI / 2 + left * TAU); ctx.stroke(); // 남은시간 게이지
+      ctx.globalAlpha = pulse; ctx.fillStyle = '#5fe9d8'; ctx.shadowBlur = 14; // ▶ 탭 글리프(중앙)
+      ctx.beginPath(); ctx.moveTo(-14, -18); ctx.lineTo(20, 0); ctx.lineTo(-14, 18); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.globalAlpha = 0.6 + 0.4 * Math.abs(Math.sin(G.t * 8));
+      ctx.strokeStyle = '#ff4d54'; ctx.lineWidth = 2; ctx.shadowColor = '#ff4d54'; ctx.shadowBlur = 20;
+      ctx.beginPath(); ctx.arc(CX, CY, 60, 0, TAU); ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // --- DDoS 마이너스 Affix (정의서 6.4): 시야 일부 가림 — 거슬리지만 사격은 됨 ---
@@ -2497,7 +2539,8 @@ function render() {
     `\nSLOTS ${slotStr}  (해금 ${G.maxSlots}/6, L키)` +
     `\nCHASSIS: ${G.chassis ? G.chassis.short : getChassis().short}  (Q/E or 1-5)` +
     `\nAFFIX: ${affixHudStr()}  (A키 순환)` +
-    (G.dead ? '\n☠ TERMINATED — R로 재시작' : '  ·  Enter=정비궤도');
+    (G.reviveOffer ? `\n◈ 이어하기 — 탭! (보스전 1회, ${Math.ceil(G.reviveOffer.dur - G.reviveOffer.t)}s)`
+      : G.dead ? '\n☠ TERMINATED — R로 재시작' : '  ·  Enter=정비궤도');
 }
 
 function currentDrain() {

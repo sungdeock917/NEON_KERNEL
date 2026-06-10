@@ -216,6 +216,24 @@ DRIVE_JS = r"""
       if (!SAVE.cleared) throw new Error("SAVE.cleared 미설정");
     });
 
+    // ===== 이어하기 (정의서 9.5) — 보스전 1회 한정 =====
+    step("revive-boss-offer", () => {
+      newGame(); startWave(20); G.hp = 0; die();
+      if (!G.dead || !G.reviveOffer) throw new Error("보스전 사망인데 이어하기 오퍼 없음");
+      const hp = G.hpMax * 0.5; reviveRun();
+      if (G.dead || G.reviveOffer) throw new Error("이어하기 후에도 사망 상태");
+      if (!G.boss) throw new Error("이어하기 후 보스 사라짐(빌드/전투 유지 실패)");
+      if (Math.abs(G.hp - hp) > 1e-6) throw new Error("이어하기 체력 절반 회복 아님: " + G.hp);
+      if (!G.continueUsed) throw new Error("continueUsed 미설정");
+      // 판당 1회: 두 번째 보스전 사망엔 오퍼 없음
+      G.hp = 0; die();
+      if (G.reviveOffer) throw new Error("판당 2회째 이어하기 오퍼가 떠선 안 됨");
+    });
+    step("revive-nonboss-skip", () => {
+      newGame(); G.boss = null; G.hp = 0; die();
+      if (G.reviveOffer) throw new Error("일반 웨이브 사망엔 이어하기 오퍼 없어야");
+    });
+
     // ===== 아웃게임(메타) =====
     step("meta-save", () => {
       if (!SAVE || SAVE.v !== 1) throw new Error("SAVE 손상");
