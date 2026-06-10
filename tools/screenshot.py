@@ -65,18 +65,26 @@ SHOTS = [
         G.selCandIdx = 0;
         setAimToast(G.candidates[0]); G.aimToast.t = 0.3;
     }"""),
-    ("B1_walle.png", "보스 WALL_E (3 회전 방패)", """() => {
+    ("B1_walle.png", "보스 WALL_E (방패 + 집속 일제사 예고)", """() => {
         startWave(10); G.boss.hp = G.boss.hpMax * 0.7;
+        startBossTelegraph(G.boss); G.boss.tele.t = G.boss.tele.dur * 0.7; // 집속 예고선
     }"""),
-    ("B2_antiv.png", "보스 ANTI_V (포탑 + 에러블록)", """() => {
+    ("B2_antiv.png", "보스 ANTI_V (에러블록 + 멀티 락온 예고)", """() => {
         startWave(20); G.boss.hp = G.boss.hpMax * 0.6;
         G.boss.blocks.push({ang: 1.0, life: 4, max: 4});
         G.boss.blocks.push({ang: 3.4, life: 4, max: 4});
         doSpawn(0.6, ENEMY.shooter); doSpawn(2.5, ENEMY.shooter);
+        startBossTelegraph(G.boss); G.boss.tele.t = G.boss.tele.dur * 0.7; // 3방향 락온선
     }"""),
-    ("B3_panic.png", "보스 KERNEL_PANIC (테두리=HP + 물량)", """() => {
+    ("B3_panic.png", "보스 KERNEL_PANIC (테두리=HP + 수축 링 예고)", """() => {
         startWave(30); G.boss.hp = G.boss.hpMax * 0.55;
         for (let i = 0; i < 8; i++) doSpawn(i / 8 * Math.PI * 2, i % 2 ? ENEMY.runner : ENEMY.bouncer);
+        startBossTelegraph(G.boss); G.boss.tele.t = G.boss.tele.dur * 0.7; // 틈 있는 전방위 링 예고
+    }"""),
+    ("B4_revive.png", "이어하기 오퍼 (보스전 사망, 시안 카운트다운 링)", """() => {
+        startWave(20); G.boss.hp = G.boss.hpMax * 0.5;
+        G.hp = 0; die(); // 보스전 사망 → 이어하기 오퍼
+        G.reviveOffer.t = G.reviveOffer.dur * 0.35;
     }"""),
 ]
 

@@ -216,6 +216,33 @@ DRIVE_JS = r"""
       if (!SAVE.cleared) throw new Error("SAVE.cleared 미설정");
     });
 
+    // ===== 보스 시그니처 텔레그래프 공격 (정의서 3.7/11.1) =====
+    step("boss-special-attacks", () => {
+      for (const [w, kind, minBolts] of [[10, "walle", 1], [20, "antiv", 3], [30, "panic", 8]]) {
+        newGame(); startWave(w); const b = G.boss; G.ebullets = [];
+        b.atkT = 0; bossSpecial(b, 0.016);                       // 텔레그래프 시작
+        if (!b.tele) throw new Error(kind + " 텔레그래프 미시작");
+        let guard = 0; while (b.tele && guard++ < 400) bossSpecial(b, 0.05); // 차징 완료→발사
+        if (G.ebullets.length < minBolts) throw new Error(kind + " 인바운드 탄 부족: " + G.ebullets.length);
+        const eb = G.ebullets[0];                                 // 탄은 중심을 향해야(요격 가능)
+        if (eb.vx * (CX - eb.x) + eb.vy * (CY - eb.y) <= 0) throw new Error(kind + " 탄이 중심을 안 향함");
+        if (!eb.boss) throw new Error(kind + " 보스탄 플래그 누락");
+      }
+    });
+    step("boss-phase2-faster", () => {
+      newGame(); startWave(30); const b = G.boss;
+      const p1 = bossAtkPeriod(b); b.phase = 2; const p2 = bossAtkPeriod(b);
+      if (!(p2 < p1)) throw new Error("페이즈2 공격주기가 더 짧아야: " + p1 + "→" + p2);
+    });
+    step("boss-special-defendable", () => {
+      // panic 수축 링엔 틈(안전 각도)이 있어야 — 전부 막히면 노히트 불가(11.2 원칙)
+      newGame(); startWave(30); const b = G.boss; G.ebullets = [];
+      b.atkT = 0; bossSpecial(b, 0.016); let g = 0;
+      while (b.tele && g++ < 400) bossSpecial(b, 0.05);
+      const N = 36, full = N; // 틈 없으면 36발
+      if (G.ebullets.length >= full) throw new Error("수축 링에 틈이 없음(노히트 불가)");
+    });
+
     // ===== 이어하기 (정의서 9.5) — 보스전 1회 한정 =====
     step("revive-boss-offer", () => {
       newGame(); startWave(20); G.hp = 0; die();
@@ -266,8 +293,8 @@ DRIVE_JS = r"""
       if (chassisLocked(CHASSIS.find(c => c.id === "deepweb"))) throw new Error("클리어 후 딥웹 해제여야");
     });
 
-    // 정상 상태로 리셋 + 게임 씬 진입(라이브 구동에서 update/G.t 돌도록)
-    step("reset", () => { SAVE.chassis = "legacy"; startGame(); });
+    // 정상 상태로 리셋 + 보스전 진입(라이브 구동에서 텔레그래프/인바운드탄/요격 렌더 자극)
+    step("reset", () => { SAVE.chassis = "legacy"; startGame(); startWave(20); if (G.boss) G.boss.atkT = 0.4; });
   } catch (e) {
     return { ok: false, where: e.where || "?", msg: String(e), log };
   }

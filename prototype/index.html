@@ -1194,7 +1194,8 @@ function spawnBoss(kind) {
   const d = BOSS_DEF[kind];
   const hp = Math.round(d.hp * (kind === 'panic' ? 1 : hpScale(G.wave) * 0.85));
   G.boss = { kind, name: d.name, color: d.color, r: d.r, hp, hpMax: hp, t: 0, phase: 1, hit: 0,
-    x: CX, y: CY - 150, ang: -Math.PI / 2, fireT: 1.6, spawnT: 2.2, shieldRot: 0, blocks: [] };
+    x: CX, y: CY - 150, ang: -Math.PI / 2, fireT: 1.6, spawnT: 2.2, shieldRot: 0, blocks: [],
+    atkT: 3.5, tele: null }; // 시그니처 텔레그래프 공격(정렬 보상) — atkT=다음 공격까지, tele=차징 중 예고
   G.shake = 14;
 }
 
@@ -1204,7 +1205,8 @@ function updateBoss(dt) {
   if (b.kind === 'walle') updateWalle(b, dt);
   else if (b.kind === 'antiv') updateAntiv(b, dt);
   else if (b.kind === 'panic') updatePanic(b, dt);
-  if (b.phase === 1 && b.hp <= b.hpMax * 0.5) { b.phase = 2; G.shake = Math.max(G.shake, 12); } // 페이즈 전환(8.1 노바 저격 창)
+  bossSpecial(b, dt); // 시그니처 텔레그래프 공격(예고→정렬 요격)
+  if (b.phase === 1 && b.hp <= b.hpMax * 0.5) { b.phase = 2; G.shake = Math.max(G.shake, 12); b.atkT = Math.min(b.atkT, 1.2); } // 페이즈 전환(8.1 노바 저격 창) — 진입 직후 강화 공격 예고
   if (b.hp <= 0) killBoss();
 }
 
@@ -1255,6 +1257,82 @@ function updatePanic(b, dt) {
   }
 }
 
+//----------------------------------------------------------------------------
+// 보스 시그니처 텔레그래프 공격 (정의서 3.7/11.1) — 예고글로우 후 인바운드 탄,
+// 브레이크 6방향 고정사격(2.1)이 그 각도를 요격 = "위상 정렬" 보상. 페이즈2 강화.
+//----------------------------------------------------------------------------
+function bossAtkPeriod(b) {
+  const base = b.kind === 'panic' ? 4.6 : b.kind === 'antiv' ? 6.0 : 5.0;
+  return b.phase === 2 ? base * 0.62 : base;
+}
+function bossSpecial(b, dt) {
+  if (b.tele) {
+    b.tele.t += dt;
+    if (b.tele.t >= b.tele.dur) { resolveBossAttack(b); b.tele = null; b.atkT = bossAtkPeriod(b); }
+    return;
+  }
+  b.atkT -= dt;
+  if (b.atkT <= 0) startBossTelegraph(b);
+}
+function startBossTelegraph(b) {
+  const p2 = b.phase === 2;
+  if (b.kind === 'walle') {
+    const a = Math.atan2(CY - b.y, CX - b.x); // 보스→중심: 들어오는 탄류 각도
+    b.tele = { kind: 'walle', t: 0, dur: p2 ? 0.85 : 1.3, angs: [a] };
+  } else if (b.kind === 'antiv') {
+    const K = p2 ? 4 : 3, start = rand(0, TAU), angs = [];
+    for (let i = 0; i < K; i++) angs.push(start + i / K * TAU); // K방향 동시 락온
+    b.tele = { kind: 'antiv', t: 0, dur: p2 ? 1.0 : 1.4, angs };
+  } else { // panic — 전방위 수축 링(틈으로 회피 / 격자 요격)
+    const start = rand(0, TAU), gaps = p2 ? [start] : [start, start + Math.PI];
+    b.tele = { kind: 'panic', t: 0, dur: p2 ? 0.8 : 1.1, gaps };
+  }
+  G.shake = Math.max(G.shake, 6);
+}
+function mkInbound(ang, r0, spd, rad, color) { // 중심을 향해 들어오는 적탄
+  return { x: CX + Math.cos(ang) * r0, y: CY + Math.sin(ang) * r0,
+    vx: -Math.cos(ang) * spd, vy: -Math.sin(ang) * spd, life: 6, r: rad, boss: true, color };
+}
+function resolveBossAttack(b) {
+  const t = b.tele, p2 = b.phase === 2;
+  if (b.kind === 'walle') {
+    const a = t.angs[0], n = p2 ? 6 : 4, spd = p2 ? 250 : 215;
+    for (let i = 0; i < n; i++) G.ebullets.push(mkInbound(a, 360 - i * 24, spd, 6, b.color)); // 집속 탄류
+  } else if (b.kind === 'antiv') {
+    for (const a of t.angs) G.ebullets.push(mkInbound(a, 330, p2 ? 230 : 205, 7, b.color)); // 멀티 락온
+  } else { // panic 수축 링
+    const N = 36, gapHalf = p2 ? 0.34 : 0.52, r0 = bossBorderR() - 8, spd = p2 ? 185 : 150;
+    for (let i = 0; i < N; i++) { const a = i / N * TAU;
+      if (t.gaps.some(g => angDiff(a, g) < gapHalf)) continue; // 틈 = 안전
+      G.ebullets.push(mkInbound(a, r0, spd, 5, b.color));
+    }
+  }
+  G.shake = Math.max(G.shake, 9);
+}
+// 텔레그래프 예고 렌더 — 차징이 t→dur로 채워지며 발사 임박 시각화
+function drawBossTele(b) {
+  const t = b.tele; if (!t) return;
+  const prog = clamp(t.t / t.dur, 0, 1), pulse = 0.3 + 0.6 * prog * (0.6 + 0.4 * Math.abs(Math.sin(G.t * 14)));
+  ctx.save(); ctx.strokeStyle = b.color; ctx.shadowColor = b.color; ctx.shadowBlur = 12; ctx.globalAlpha = pulse;
+  if (t.kind === 'walle') {
+    const a = t.angs[0], r0 = 360; ctx.lineWidth = 2 + 4 * prog; ctx.setLineDash([10, 8]);
+    ctx.beginPath(); ctx.moveTo(CX + Math.cos(a) * r0, CY + Math.sin(a) * r0); ctx.lineTo(CX, CY); ctx.stroke();
+    ctx.setLineDash([]);
+  } else if (t.kind === 'antiv') {
+    ctx.lineWidth = 2 + 3 * prog; ctx.setLineDash([8, 7]);
+    for (const a of t.angs) { ctx.beginPath(); ctx.moveTo(CX + Math.cos(a) * 330, CY + Math.sin(a) * 330); ctx.lineTo(CX, CY); ctx.stroke(); }
+    ctx.setLineDash([]);
+  } else { // panic — 테두리 링 예고(틈 비움)
+    const N = 36, gapHalf = b.phase === 2 ? 0.34 : 0.52, r0 = bossBorderR() - 8;
+    ctx.lineWidth = 3 + 5 * prog;
+    for (let i = 0; i < N; i++) { const a = i / N * TAU;
+      if (t.gaps.some(g => angDiff(a, g) < gapHalf)) continue;
+      ctx.beginPath(); ctx.arc(r0 * Math.cos(a) + CX, r0 * Math.sin(a) + CY, 3 + 3 * prog, 0, TAU); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 function killBoss() {
   const kind = G.boss.kind, bx = G.boss.x || CX, by = G.boss.y || CY;
   G.boss = null;
@@ -1270,6 +1348,7 @@ function killBoss() {
 // 보스 렌더 — 텍스트 제로(네온 형태/HP바/테두리)
 function drawBoss() {
   const b = G.boss; if (!b) return;
+  drawBossTele(b); // 시그니처 공격 예고(모든 보스 공통, 본체보다 먼저)
   if (b.kind === 'panic') { // 테두리 = HP
     const BR = bossBorderR(), frac = clamp(b.hp / b.hpMax, 0, 1);
     ctx.save();
@@ -2126,10 +2205,14 @@ function render() {
     ctx.restore();
   }
 
-  // --- 적 탄 ---
-  ctx.save(); ctx.shadowColor = '#ff7a54'; ctx.shadowBlur = 10;
-  ctx.fillStyle = '#ff8a5a';
-  for (const b of G.ebullets) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill(); }
+  // --- 적 탄 (보스 시그니처 탄은 보스 색 + 외곽 코어로 구분) ---
+  ctx.save(); ctx.shadowBlur = 10;
+  for (const b of G.ebullets) {
+    const col = b.boss ? (b.color || '#ff5d54') : '#ff8a5a';
+    ctx.fillStyle = col; ctx.shadowColor = b.boss ? col : '#ff7a54';
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+    if (b.boss) { ctx.fillStyle = '#fff'; ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.4, 0, TAU); ctx.fill(); ctx.globalAlpha = 1; }
+  }
   ctx.restore();
 
   // --- 적 ---
