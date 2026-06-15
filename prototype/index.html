@@ -55,10 +55,37 @@ const ctx = cv.getContext('2d');
 const hud = document.getElementById('hud');
 const help = document.getElementById('help');
 
+// ── 성능: shadowBlur 글로우 비용 제어 ─────────────────────────────────────────
+// Canvas2D shadowBlur는 드로우마다 GPU 블러 패스를 강제해 다수 엔티티(탄·적·파티클)
+// 렌더 시 프레임을 잡아먹는다(실측: 끄면 52→60fps 고정). 핫 루프는 glowMul=0으로 블러를
+// 끄고 싼 가산 헤일로(neonGlow)로 대체, 소수 히어로 FX(보스·노바·충격파·UI 링)만 블러 유지.
+let glowMul = 1; // 0이면 이후 모든 shadowBlur 지정이 0 (핫 루프에서 일시 0)
+(function () {
+  const d = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'shadowBlur');
+  if (d && d.set) Object.defineProperty(ctx, 'shadowBlur', {
+    configurable: true, get() { return d.get.call(this); }, set(v) { d.set.call(this, v * glowMul); },
+  });
+})();
+// 싼 네온 글로우: 가산(lighter) 헤일로 1패스. 엔티티 리스트를 받아 큰 반투명 원을 더해 빛번짐 흉내.
+function neonGlow(list, rScale, alpha, colorOf) {
+  if (!list.length) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = alpha;
+  let cur = null;
+  for (const it of list) {
+    if (it.life !== undefined && it.life <= 0) continue;
+    const col = colorOf(it); if (col !== cur) { ctx.fillStyle = col; cur = col; }
+    ctx.beginPath(); ctx.arc(it.x, it.y, (it.r || 4) * rScale, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
 // ---- 화면 / 좌표 ----------------------------------------------------------
 let W = 0, H = 0, CX = 0, CY = 0, DPR = 1;
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  // DPR 상한 1.5: 고DPI/대형 화면에서 백킹스토어 픽셀 폭증 억제(네온 룩은 1.5로 충분, shadowBlur·fill 비용 비례 감소)
+  DPR = Math.min(window.devicePixelRatio || 1, 1.5);
   W = window.innerWidth; H = window.innerHeight;
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
   cv.width = Math.floor(W * DPR); cv.height = Math.floor(H * DPR);
@@ -1463,6 +1490,7 @@ function updateFx(dt) {
     if (!p.ripple) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; }
   }
   G.particles = G.particles.filter(p => p.life > 0);
+  if (G.particles.length > 300) G.particles = G.particles.slice(-300); // 최악치 상한(다중 폭발 누적 방지)
   if (G.flash > 0) G.flash -= dt * 3;
   if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 40);
 }
@@ -2234,20 +2262,22 @@ function render() {
   }
 
   // --- 적 탄 (보스 시그니처 탄은 보스 색 + 외곽 코어로 구분) ---
-  ctx.save(); ctx.shadowBlur = 10;
+  neonGlow(G.ebullets, 1.9, 0.5, b => b.boss ? (b.color || '#ff5d54') : '#ff7a54'); // 싼 가산 글로우(블러 대체)
+  ctx.save(); glowMul = 0;
   for (const b of G.ebullets) {
     const col = b.boss ? (b.color || '#ff5d54') : '#ff8a5a';
-    ctx.fillStyle = col; ctx.shadowColor = b.boss ? col : '#ff7a54';
+    ctx.fillStyle = col;
     ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
     if (b.boss) { ctx.fillStyle = '#fff'; ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.4, 0, TAU); ctx.fill(); ctx.globalAlpha = 1; }
   }
-  ctx.restore();
+  glowMul = 1; ctx.restore();
 
   // --- 적 ---
+  neonGlow(G.enemies, 1.15, 0.32, e => e.color); // 싼 가산 글로우(블러 대체)
+  glowMul = 0;
   for (const e of G.enemies) {
     ctx.save();
     const c = e.hit > 0 ? '#ffffff' : e.color;
-    ctx.shadowColor = e.color; ctx.shadowBlur = 12;
     ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.fillStyle = 'rgba(0,0,0,.35)';
     ctx.translate(e.x, e.y);
     ctx.beginPath();
@@ -2282,23 +2312,26 @@ function render() {
     }
     ctx.restore();
   }
+  glowMul = 1;
 
   // --- 보스 ---
   drawBoss();
 
   // --- 아군 탄 — 코어(메커니즘)별로 다른 모양 ---
-  ctx.save(); ctx.shadowBlur = 8;
+  neonGlow(G.bullets.filter(b => b.behavior !== 'beam'), 1.7, 0.45, b => b.color || '#bdf6ff'); // 싼 가산 글로우(빔 제외)
+  ctx.save(); glowMul = 0; // 핫 루프 블러 off(빔은 별도 처리에서 잠시 복원)
   for (const b of G.bullets) {
     const col = b.color || '#bdf6ff';
     ctx.fillStyle = col; ctx.strokeStyle = col; ctx.shadowColor = col;
     const bh = b.behavior || 'straight';
     if (bh === 'beam') {
-      // 레이저: 슬롯에서 뻗는 굵은 라인 + 코어 글로우
+      // 레이저: 슬롯에서 뻗는 굵은 라인 + 코어 글로우 (빔은 소수 — 블러 잠시 복원)
+      glowMul = 1;
       const ex = b.x + Math.cos(b.angle) * b.range, ey = b.y + Math.sin(b.angle) * b.range;
       ctx.globalAlpha = 0.85; ctx.shadowBlur = 18; ctx.lineCap = 'round';
       ctx.lineWidth = b.width * 1.6; ctx.globalAlpha = 0.3; ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(ex, ey); ctx.stroke();
       ctx.lineWidth = b.width * 0.7; ctx.globalAlpha = 0.95; ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(ex, ey); ctx.stroke();
-      ctx.strokeStyle = col;
+      ctx.strokeStyle = col; ctx.shadowBlur = 0; glowMul = 0;
     } else if (bh === 'burst') {
       // 버스트 탄: 충전된 직선탄(앞쪽 짧은 꼬리)
       ctx.globalAlpha = 1; ctx.shadowBlur = 12;
@@ -2349,7 +2382,7 @@ function render() {
       ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
     }
   }
-  ctx.restore();
+  glowMul = 1; ctx.restore();
 
   // --- 동적동기화(민트×퍼플): 가까운 투사체끼리 중력 레이저 실로 연결 ---
   const sync = G.bullets.filter(b => b.combo === 'mint+purple' && b.life > 0);
@@ -2529,11 +2562,11 @@ function render() {
     ctx.restore();
   }
 
-  // --- 파티클 ---
+  // --- 파티클 (최다 개수 — 블러 off, 가산 블렌딩으로 빛번짐만 싸게) ---
+  ctx.save(); glowMul = 0; ctx.globalCompositeOperation = 'lighter';
   for (const p of G.particles) {
     const al = clamp(p.life / (p.max || 0.5), 0, 1);
-    ctx.save(); ctx.globalAlpha = al;
-    ctx.shadowColor = p.color; ctx.shadowBlur = 8;
+    ctx.globalAlpha = al;
     if (p.ripple) {
       ctx.strokeStyle = p.color; ctx.lineWidth = 2;
       const rr = p.r0 + (p.r - p.r0) * (1 - al);
@@ -2542,8 +2575,8 @@ function render() {
       ctx.fillStyle = p.color;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
     }
-    ctx.restore();
   }
+  glowMul = 1; ctx.restore();
 
   ctx.restore(); // shake
 
