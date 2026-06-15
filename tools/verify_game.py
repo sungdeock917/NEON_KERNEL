@@ -227,6 +227,11 @@ DRIVE_JS = r"""
         const eb = G.ebullets[0];                                 // 탄은 중심을 향해야(요격 가능)
         if (eb.vx * (CX - eb.x) + eb.vy * (CY - eb.y) <= 0) throw new Error(kind + " 탄이 중심을 안 향함");
         if (!eb.boss) throw new Error(kind + " 보스탄 플래그 누락");
+        // walle: 탄류가 보스 쪽에서 출발해야(반대편 스폰 버그 회귀)
+        if (kind === "walle" && ((eb.x - CX) * (b.x - CX) + (eb.y - CY) * (b.y - CY)) <= 0)
+          throw new Error("walle 탄이 보스 반대편에서 스폰");
+        // 스폰 반경은 화면 비례여야(모바일 일관) — 화면 대각 밖 고정픽셀 금지
+        if (Math.hypot(eb.x - CX, eb.y - CY) > Math.min(W, H) * 0.65) throw new Error(kind + " 스폰 반경이 화면 비례 아님");
       }
     });
     step("boss-phase2-faster", () => {
@@ -259,6 +264,94 @@ DRIVE_JS = r"""
     step("revive-nonboss-skip", () => {
       newGame(); G.boss = null; G.hp = 0; die();
       if (G.reviveOffer) throw new Error("일반 웨이브 사망엔 이어하기 오퍼 없어야");
+    });
+
+    // ===== 실입력 체인 (pressDown/pressUp 경유 — 함수 직접 호출만으론 입력 버그를 못 잡는다) =====
+    step("input-brake-instant", () => {
+      SAVE.chassis = "legacy"; startGame(); const dir0 = G.dir, hp0 = G.hp;
+      pressDown();
+      if (!G.braking) throw new Error("누르는 즉시 브레이크가 아님(반응 지연)");
+      update(0.05);                                  // held 0.05 < TAP_MAX → 탁으로 분류돼야
+      pressUp();
+      if (G.braking) throw new Error("탭 후 브레이크 잔류");
+      if (G.dir !== -dir0) throw new Error("탭=회전반전 미동작");
+      if (G.hp < hp0 - 1e-9) throw new Error("탭(TAP_MAX 이하)에 드레인 부과: " + (hp0 - G.hp));
+    });
+    step("input-brake-drain-gate", () => {
+      startGame(); const hp0 = G.hp, dir0 = G.dir;
+      pressDown();
+      for (let f = 0; f < 60; f++) update(1 / 60);   // 1초 홀드 = 꾹
+      if (!G.braking) throw new Error("홀드 중 브레이크 해제됨");
+      if (!(G.hp < hp0)) throw new Error("1초 홀드인데 드레인 없음(비용 소실)");
+      pressUp();
+      if (G.dir !== dir0) throw new Error("꾹 해제가 회전반전을 일으킴");
+    });
+    step("input-grace-tap-free", () => {
+      // grace(0.5s) 재진입 탭: brakeTime이 높게 이월돼도 '탁 플릭'은 드레인 0(탭=무비용 일관성)
+      startGame();
+      pressDown();
+      for (let f = 0; f < 120; f++) update(1 / 60);   // 2초 홀드 → brakeTime 누적(드레인 단계 진입)
+      pressUp();                                       // releaseGrace=0.5 + brakeTime 보존
+      pressDown();                                     // grace 내 재진입(brakeTime 이월=높음)
+      if (G.brakeTime < 1.0) throw new Error("grace 재진입인데 brakeTime이 보존 안 됨: " + G.brakeTime);
+      const hp0 = G.hp;
+      update(0.05);                                    // 이번 누름 held<TAP_MAX → 게이트 차단
+      if (G.hp < hp0 - 1e-9) throw new Error("grace 재진입 탭에 드레인 부과(탭=무비용 위반): " + (hp0 - G.hp));
+      pressUp();
+    });
+    step("input-revive-chain", () => {
+      startGame(); startWave(20); G.hp = 0; die();
+      if (!G.reviveOffer) throw new Error("보스전 사망 오퍼 없음");
+      pressDown();                                   // 사망 직후(arming 0.5s 전) 연타 → 무시
+      if (!G.dead) throw new Error("arming 전 탭이 이어하기를 소모");
+      for (let f = 0; f < 40; f++) update(1 / 60);   // 0.67s 경과(오퍼 6s 내)
+      pressDown();                                   // 실입력 탭 = 이어하기
+      if (G.dead) throw new Error("실입력 탭으로 이어하기 미발동");
+      if (!G.boss) throw new Error("이어하기 후 보스 소실");
+      const dir0 = G.dir;
+      G.hp = 0; die();                               // 판당 1회 소진 → 오퍼 없음
+      if (G.reviveOffer) throw new Error("이어하기 2회 오퍼");
+      // 사망 시점에 '짧게' 누르고 있던 손가락의 release: held<TAP_MAX라도 사망 중이면 무동작이어야
+      // (pressStart를 stale로 두면 held가 커져 탁 분기를 우회 → 가드 회귀를 못 잡는 공허한 단언이 됨)
+      pressing = true; pressStart = G.t - 0.05; pressUp();
+      if (scene !== "game") throw new Error("사망 중 release가 정산 등 동작 유발");
+      if (G.dir !== dir0) throw new Error("사망 중 release가 회전반전을 일으킴");
+      for (let f = 0; f < 40; f++) update(1 / 60);
+      if (G.ended) throw new Error("이 시점 G.ended는 false여야(정산 미발생)"); // 강제 리셋 제거: 회귀 감지
+      pressDown();                                   // arming 후 탭 = 정산 스킵
+      if (scene !== "result") throw new Error("사망 탭 정산 스킵 실패");
+    });
+    step("input-orbit-chain", () => {
+      // 정비궤도 입력도 실입력 경유 검증(pressDown의 phase 가드가 깨지면 후보 선택이 망가짐)
+      startGame(); G.slots[0] = makeT1Id("streamPing"); enterOrbit();
+      if (G.phase !== "orbit") throw new Error("정비궤도 진입 실패");
+      pressDown();
+      if (G.braking) throw new Error("정비궤도에서 pressDown이 브레이크 진입(전투 전용 가드 깨짐)");
+      const idx0 = G.selCandIdx;
+      pressUp();                                      // 짧은 탭 = 후보 다음(orbitTap)
+      if (G.selCandIdx === idx0 && G.candidates.length > 1) throw new Error("궤도 탭이 후보 이동 안 함");
+    });
+    step("input-carried-hold-fallback", () => {
+      // 이월 홀드: pressDown을 안 거친 홀드(궤도→전투 전환 등)가 update 폴백으로 브레이크 진입하는지
+      startGame(); pressing = true; pressStart = G.t; G.braking = false;
+      update(0.05);                                   // held<TAP_MAX → 아직 진입 안 함
+      if (G.braking) throw new Error("폴백이 TAP_MAX 전에 브레이크 진입");
+      for (let f = 0; f < 12; f++) update(1 / 60);    // held>TAP_MAX 경과
+      if (!G.braking) throw new Error("이월 홀드 폴백 미작동(브레이크 미진입)");
+      pressing = false; pressUp();
+    });
+    step("boss-phase2-rush-mid-tele", () => {
+      newGame(); startWave(20); const b = G.boss;
+      b.atkT = 0; bossSpecial(b, 0.016);             // 차징 시작
+      b.hp = b.hpMax * 0.4; updateBoss(0.016);       // 차징 도중 페이즈2 진입
+      if (!b.p2Rush) throw new Error("차징 중 페이즈2 진입인데 p2Rush 미설정");
+      let g = 0; while (b.tele && g++ < 400) bossSpecial(b, 0.05); // 강화공격 해소
+      if (b.atkT > 1.2 + 1e-6) throw new Error("페이즈2 진입 후 강화공격 예고 소실: atkT=" + b.atkT);
+      if (b.p2Rush) throw new Error("p2Rush가 1회성 리셋 안 됨(이후 영구 1.2s 광속주기 회귀)");
+      // 다음 공격은 정상 주기(bossAtkPeriod)로 복귀해야
+      let g2 = 0; while (!b.tele && g2++ < 200) bossSpecial(b, 0.05); // 다음 텔레그래프까지
+      while (b.tele && g2++ < 400) bossSpecial(b, 0.05);             // 해소
+      if (b.atkT < bossAtkPeriod(b) - 1e-6) throw new Error("p2Rush 후 공격주기가 정상 복귀 안 함: " + b.atkT);
     });
 
     // ===== 아웃게임(메타) =====

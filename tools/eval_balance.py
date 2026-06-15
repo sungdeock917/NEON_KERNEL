@@ -99,7 +99,9 @@ def main():
         b = p.chromium.launch(headless=True)
         pg = b.new_page()
         pg.goto(INDEX.as_uri())
-        pg.wait_for_function("typeof G !== 'undefined' && G && G.t >= 0", timeout=8000)
+        # 아웃게임 도입 후 로드 시 scene='main'이라 G가 없음 — SAVE 대기 후 인게임 부팅
+        pg.wait_for_function("typeof SAVE !== 'undefined' && typeof startGame === 'function'", timeout=8000)
+        pg.evaluate("() => { SAVE = defaultSave(); startGame(); }")
         data = pg.evaluate(COLLECT)
         affix = pg.evaluate(COLLECT_AFFIX)
         b.close()

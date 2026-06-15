@@ -65,21 +65,22 @@ SHOTS = [
         G.selCandIdx = 0;
         setAimToast(G.candidates[0]); G.aimToast.t = 0.3;
     }"""),
+    # 텔레그래프 샷: dur를 크게 잡아 0.6s sleep 동안 RAF가 예고를 resolve하지 못하게 고정(prog 0.7 유지)
     ("B1_walle.png", "보스 WALL_E (방패 + 집속 일제사 예고)", """() => {
         startWave(10); G.boss.hp = G.boss.hpMax * 0.7;
-        startBossTelegraph(G.boss); G.boss.tele.t = G.boss.tele.dur * 0.7; // 집속 예고선
+        startBossTelegraph(G.boss); G.boss.tele.dur = 1000; G.boss.tele.t = 700; // 집속 예고선(prog 0.7 고정)
     }"""),
     ("B2_antiv.png", "보스 ANTI_V (에러블록 + 멀티 락온 예고)", """() => {
         startWave(20); G.boss.hp = G.boss.hpMax * 0.6;
         G.boss.blocks.push({ang: 1.0, life: 4, max: 4});
         G.boss.blocks.push({ang: 3.4, life: 4, max: 4});
         doSpawn(0.6, ENEMY.shooter); doSpawn(2.5, ENEMY.shooter);
-        startBossTelegraph(G.boss); G.boss.tele.t = G.boss.tele.dur * 0.7; // 3방향 락온선
+        startBossTelegraph(G.boss); G.boss.tele.dur = 1000; G.boss.tele.t = 700; // 3방향 락온선(prog 0.7 고정)
     }"""),
     ("B3_panic.png", "보스 KERNEL_PANIC (테두리=HP + 수축 링 예고)", """() => {
         startWave(30); G.boss.hp = G.boss.hpMax * 0.55;
         for (let i = 0; i < 8; i++) doSpawn(i / 8 * Math.PI * 2, i % 2 ? ENEMY.runner : ENEMY.bouncer);
-        startBossTelegraph(G.boss); G.boss.tele.t = G.boss.tele.dur * 0.7; // 틈 있는 전방위 링 예고
+        startBossTelegraph(G.boss); G.boss.tele.dur = 1000; G.boss.tele.t = 700; // 전방위 링 예고(prog 0.7 고정)
     }"""),
     ("B4_revive.png", "이어하기 오퍼 (보스전 사망, 시안 카운트다운 링)", """() => {
         startWave(20); G.boss.hp = G.boss.hpMax * 0.5;
@@ -111,6 +112,19 @@ META_SHOTS = [
 ]
 
 
+# 모바일 뷰포트(390×844) — 텔레그래프/보스가 좁은 세로 화면에서도 읽히는지 (이름 Bm_ 접두)
+MOBILE_SHOTS = [
+    ("Bm1_walle_mobile.png", "모바일: WALL_E 집속 예고(보스 측에서)", """() => {
+        startWave(10); G.boss.hp = G.boss.hpMax * 0.7;
+        startBossTelegraph(G.boss); G.boss.tele.dur = 1000; G.boss.tele.t = 700;
+    }"""),
+    ("Bm3_panic_mobile.png", "모바일: PANIC 수축 링 예고(화면 비례)", """() => {
+        startWave(30); G.boss.hp = G.boss.hpMax * 0.55;
+        startBossTelegraph(G.boss); G.boss.tele.dur = 1000; G.boss.tele.t = 700;
+    }"""),
+]
+
+
 def main():
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
@@ -131,8 +145,19 @@ def main():
             time.sleep(0.5)
             pg.locator("canvas").screenshot(path=str(OUT / fname))
             print(f"saved {fname}  — {desc}")
+        # 모바일 뷰포트
+        pgm = b.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2)
+        pgm.goto(INDEX.as_uri())
+        pgm.wait_for_function("typeof SAVE !== 'undefined' && typeof startGame === 'function'", timeout=8000)
+        for fname, desc, setup in MOBILE_SHOTS:
+            pgm.evaluate("() => startGame()")
+            time.sleep(0.4)
+            pgm.evaluate(setup)
+            time.sleep(0.6)
+            pgm.locator("canvas").screenshot(path=str(OUT / fname))
+            print(f"saved {fname}  — {desc}")
         b.close()
-    print(f"\n{len(SHOTS) + len(META_SHOTS)} shots -> {OUT}")
+    print(f"\n{len(SHOTS) + len(META_SHOTS) + len(MOBILE_SHOTS)} shots -> {OUT}")
 
 
 if __name__ == "__main__":

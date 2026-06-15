@@ -951,21 +951,28 @@ function updateOrbit(dt) {
 // 입력 — 단일 터치/클릭 (탁=짧게, 꾹=홀드)
 //============================================================================
 const TAP_MAX = 0.18;    // 이 시간 이하로 떼면 '탁'(반전), 넘으면 '꾹'으로 간주
-let pressing = false, pressStart = 0, pressMoved = false, didBrake = false;
+let pressing = false, pressStart = 0, pressMoved = false;
 
 function pressDown() {
-  if (G.dead) return;
-  pressing = true; pressStart = G.t; didBrake = false;
+  if (G.dead) { // 사망 중 탭은 누르는 순간 처리 (release 대기 없음)
+    if (G.deadT < 0.5) return;                 // 오발동 방지: 사망 직후 연타 무시(이어하기 1회 보호)
+    if (G.reviveOffer) reviveRun();            // 이어하기 오퍼 중 탭 = 발동 (9.5)
+    else if (!G.ended) endGame(false);         // 오퍼 없음/만료 = 정산 즉시 이동
+    return;
+  }
+  pressing = true; pressStart = G.t;
+  // 즉시 브레이크(최단 반응): 누르는 순간 회전 정지. 탁이면 release에서 반전으로 분류,
+  // 브레이크 비용(드레인)은 TAP_MAX 경과 후부터 부과(update 드레인 게이트) — 탭에 비용 없음.
+  if (G.phase === 'combat' && !G.braking) {
+    G.braking = true;
+    if (G.releaseGrace <= 0) G.brakeTime = 0; // 유예 안 재진입이면 과열 단계 유지
+  }
 }
 function pressUp() {
   if (!pressing) return;
   pressing = false;
   const held = G.t - pressStart;
-  if (G.dead) { // 사망 중 탭
-    if (G.reviveOffer) { reviveRun(); return; }      // 이어하기 오퍼 중 탭 = 이어하기 발동 (9.5)
-    if (G.deadT > 0.5) endGame(false);               // 그 외 = 정산 즉시 이동(연출 0.5s 후)
-    return;
-  }
+  if (G.dead) return; // 사망 시점에 누르고 있던 손가락의 release = 무동작(이어하기 오발동 방지)
   // --- 정비 궤도: 이산 선택 (탁=다음 항목, 꾹=확정은 update에서 처리됨) ---
   if (G.phase === 'orbit') {
     // 진입 후 새로 시작한 누름만 탁으로 인정(이월 누름 무시)
@@ -974,7 +981,7 @@ function pressUp() {
     return;
   }
   // --- 전투: 탁(반전) / 브레이크 해제 ---
-  if (held < TAP_MAX && !didBrake) {
+  if (held < TAP_MAX) {
     G.dir *= -1;
     spawnRipple(CX, CY, '#7fe9ff', 26);
   }
@@ -1206,7 +1213,11 @@ function updateBoss(dt) {
   else if (b.kind === 'antiv') updateAntiv(b, dt);
   else if (b.kind === 'panic') updatePanic(b, dt);
   bossSpecial(b, dt); // 시그니처 텔레그래프 공격(예고→정렬 요격)
-  if (b.phase === 1 && b.hp <= b.hpMax * 0.5) { b.phase = 2; G.shake = Math.max(G.shake, 12); b.atkT = Math.min(b.atkT, 1.2); } // 페이즈 전환(8.1 노바 저격 창) — 진입 직후 강화 공격 예고
+  if (b.phase === 1 && b.hp <= b.hpMax * 0.5) { // 페이즈 전환(8.1 노바 저격 창) — 진입 직후 강화 공격 예고
+    b.phase = 2; G.shake = Math.max(G.shake, 12);
+    if (b.tele) b.p2Rush = true;            // 차징 도중 전환: 현재 공격 해소 후 곧장 강화공격(리셋에 묻힘 방지)
+    else b.atkT = Math.min(b.atkT, 1.2);
+  }
   if (b.hp <= 0) killBoss();
 }
 
@@ -1268,20 +1279,27 @@ function bossAtkPeriod(b) {
 function bossSpecial(b, dt) {
   if (b.tele) {
     b.tele.t += dt;
-    if (b.tele.t >= b.tele.dur) { resolveBossAttack(b); b.tele = null; b.atkT = bossAtkPeriod(b); }
+    if (b.tele.t >= b.tele.dur) {
+      resolveBossAttack(b); b.tele = null;
+      b.atkT = b.p2Rush ? 1.2 : bossAtkPeriod(b); // 차징 중 페이즈2 진입했으면 곧장 강화공격
+      b.p2Rush = false;
+    }
     return;
   }
   b.atkT -= dt;
   if (b.atkT <= 0) startBossTelegraph(b);
 }
+function bossTeleR() { return Math.min(W, H) * 0.45; } // 텔레그래프 스폰 반경 — 화면 비례(모바일 일관)
 function startBossTelegraph(b) {
   const p2 = b.phase === 2;
   if (b.kind === 'walle') {
-    const a = Math.atan2(CY - b.y, CX - b.x); // 보스→중심: 들어오는 탄류 각도
+    const a = Math.atan2(b.y - CY, b.x - CX); // 보스의 극각 — 탄류가 보스 쪽에서 날아온다
     b.tele = { kind: 'walle', t: 0, dur: p2 ? 0.85 : 1.3, angs: [a] };
   } else if (b.kind === 'antiv') {
-    const K = p2 ? 4 : 3, start = rand(0, TAU), angs = [];
-    for (let i = 0; i < K; i++) angs.push(start + i / K * TAU); // K방향 동시 락온
+    // 락온 간격은 60°의 배수(슬롯 격자 호환) — 정렬 시 전부 요격 가능해야 노히트 보장(11.2).
+    // p1: 3방향 120° / p2: 4방향 60° 부채꼴(반원 집중 — 방향 수↑ 그러나 정렬 한 번에 커버)
+    const K = p2 ? 4 : 3, spacing = p2 ? TAU / 6 : TAU / 3, start = rand(0, TAU), angs = [];
+    for (let i = 0; i < K; i++) angs.push(start + i * spacing);
     b.tele = { kind: 'antiv', t: 0, dur: p2 ? 1.0 : 1.4, angs };
   } else { // panic — 전방위 수축 링(틈으로 회피 / 격자 요격)
     const start = rand(0, TAU), gaps = p2 ? [start] : [start, start + Math.PI];
@@ -1289,19 +1307,21 @@ function startBossTelegraph(b) {
   }
   G.shake = Math.max(G.shake, 6);
 }
-function mkInbound(ang, r0, spd, rad, color) { // 중심을 향해 들어오는 적탄
+function mkInbound(ang, r0, spd, rad, color) { // 극각 ang 위치에서 중심을 향해 들어오는 적탄
   return { x: CX + Math.cos(ang) * r0, y: CY + Math.sin(ang) * r0,
     vx: -Math.cos(ang) * spd, vy: -Math.sin(ang) * spd, life: 6, r: rad, boss: true, color };
 }
 function resolveBossAttack(b) {
   const t = b.tele, p2 = b.phase === 2;
+  // 속도 = 거리/도달시간 — 해상도와 무관하게 방어 시간창 동일(모바일 공정성)
   if (b.kind === 'walle') {
-    const a = t.angs[0], n = p2 ? 6 : 4, spd = p2 ? 250 : 215;
-    for (let i = 0; i < n; i++) G.ebullets.push(mkInbound(a, 360 - i * 24, spd, 6, b.color)); // 집속 탄류
+    const a = t.angs[0], n = p2 ? 6 : 4, r0 = bossTeleR(), spd = r0 / (p2 ? 1.45 : 1.7);
+    for (let i = 0; i < n; i++) G.ebullets.push(mkInbound(a, r0 + i * r0 * 0.06, spd, 6, b.color)); // 집속 탄류
   } else if (b.kind === 'antiv') {
-    for (const a of t.angs) G.ebullets.push(mkInbound(a, 330, p2 ? 230 : 205, 7, b.color)); // 멀티 락온
+    const r0 = bossTeleR() * 0.92, spd = r0 / (p2 ? 1.45 : 1.6);
+    for (const a of t.angs) G.ebullets.push(mkInbound(a, r0, spd, 7, b.color)); // 멀티 락온
   } else { // panic 수축 링
-    const N = 36, gapHalf = p2 ? 0.34 : 0.52, r0 = bossBorderR() - 8, spd = p2 ? 185 : 150;
+    const N = 36, gapHalf = p2 ? 0.34 : 0.52, r0 = bossBorderR() - 8, spd = r0 / (p2 ? 2.0 : 2.5);
     for (let i = 0; i < N; i++) { const a = i / N * TAU;
       if (t.gaps.some(g => angDiff(a, g) < gapHalf)) continue; // 틈 = 안전
       G.ebullets.push(mkInbound(a, r0, spd, 5, b.color));
@@ -1315,12 +1335,12 @@ function drawBossTele(b) {
   const prog = clamp(t.t / t.dur, 0, 1), pulse = 0.3 + 0.6 * prog * (0.6 + 0.4 * Math.abs(Math.sin(G.t * 14)));
   ctx.save(); ctx.strokeStyle = b.color; ctx.shadowColor = b.color; ctx.shadowBlur = 12; ctx.globalAlpha = pulse;
   if (t.kind === 'walle') {
-    const a = t.angs[0], r0 = 360; ctx.lineWidth = 2 + 4 * prog; ctx.setLineDash([10, 8]);
+    const a = t.angs[0], r0 = bossTeleR(); ctx.lineWidth = 2 + 4 * prog; ctx.setLineDash([10, 8]);
     ctx.beginPath(); ctx.moveTo(CX + Math.cos(a) * r0, CY + Math.sin(a) * r0); ctx.lineTo(CX, CY); ctx.stroke();
     ctx.setLineDash([]);
   } else if (t.kind === 'antiv') {
-    ctx.lineWidth = 2 + 3 * prog; ctx.setLineDash([8, 7]);
-    for (const a of t.angs) { ctx.beginPath(); ctx.moveTo(CX + Math.cos(a) * 330, CY + Math.sin(a) * 330); ctx.lineTo(CX, CY); ctx.stroke(); }
+    const r0 = bossTeleR() * 0.92; ctx.lineWidth = 2 + 3 * prog; ctx.setLineDash([8, 7]);
+    for (const a of t.angs) { ctx.beginPath(); ctx.moveTo(CX + Math.cos(a) * r0, CY + Math.sin(a) * r0); ctx.lineTo(CX, CY); ctx.stroke(); }
     ctx.setLineDash([]);
   } else { // panic — 테두리 링 예고(틈 비움)
     const N = 36, gapHalf = b.phase === 2 ? 0.34 : 0.52, r0 = bossBorderR() - 8;
@@ -1436,8 +1456,21 @@ function collideBoss(dt) {
 //============================================================================
 // 업데이트
 //============================================================================
+// 연출 전용 업데이트(파티클/셰이크/플래시) — 사망 중에도 호출해 폭발·링 펄스가 굳지 않게
+function updateFx(dt) {
+  for (const p of G.particles) {
+    p.life -= dt;
+    if (!p.ripple) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; }
+  }
+  G.particles = G.particles.filter(p => p.life > 0);
+  if (G.flash > 0) G.flash -= dt * 3;
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 40);
+}
+
 function update(dt) {
   if (G.dead) { // 사망 → 정산 자동 전환 (이어하기 오퍼 중엔 대기)
+    G.t += dt;      // 연출 시계는 계속(사망 폭발·링 펄스 동결 방지) — 전투 로직만 정지
+    updateFx(dt);   // 파티클/셰이크/플래시 연출 진행
     G.deadT += dt;
     if (G.reviveOffer) { G.reviveOffer.t += dt; if (G.reviveOffer.t >= G.reviveOffer.dur) G.reviveOffer = null; return; }
     if (G.deadT > 1.8) endGame(false);
@@ -1445,13 +1478,11 @@ function update(dt) {
   }
   G.t += dt;
 
-  // 입력 → 브레이크 판정 (전투에서만): TAP_MAX 넘게 누르면 브레이크 진입
-  if (G.phase === 'combat' && pressing && (G.t - pressStart) >= TAP_MAX) {
-    if (!G.braking) {
-      G.braking = true; didBrake = true;
-      // 유예 안에 재진입이면 단계 유지, 아니면 초기화
-      if (G.releaseGrace <= 0) G.brakeTime = 0;
-    }
+  // 브레이크 진입 폴백: 정비궤도→전투 전환 등으로 이월된 누름(pressDown을 안 거친 홀드) 처리.
+  // 일반 경로는 pressDown 즉시 진입(최단 반응) — 이 블록은 안전망.
+  if (G.phase === 'combat' && pressing && !G.braking && (G.t - pressStart) >= TAP_MAX) {
+    G.braking = true;
+    if (G.releaseGrace <= 0) G.brakeTime = 0;
   }
   if (G.releaseGrace > 0) G.releaseGrace -= dt;
 
@@ -1465,7 +1496,10 @@ function update(dt) {
     for (const [thr, r] of CFG.drainStages) { if (G.brakeTime <= thr) { rate = r; break; } }
     if (G.chassis && G.chassis.brakeDrain) rate = G.chassis.brakeDrain(G, rate);
     rate *= (G.brakeMul || 1); // 아웃게임 브레이크 효율(드레인 감소)
-    if (rate > 0) G.hp -= rate * dt;
+    // 드레인 게이트 = 이번 누름 지속시간(brakeTime 아님). grace 재진입 탭처럼 brakeTime이
+    // 이월돼도 '탁 플릭'은 항상 무비용 — 탭=회전반전이라는 직관 유지. 드레인 단계는 brakeTime 기준.
+    const heldDur = pressing ? (G.t - pressStart) : (TAP_MAX + 1);
+    if (rate > 0 && heldDur > TAP_MAX) G.hp -= rate * dt;
     if (G.brakeTime >= CFG.novaChargeStart) {
       G.nova = clamp(G.nova + dt / CFG.novaChargeTime * (G.novaMul || 1), 0, 1); // 노바 충전 효율
     }
@@ -1496,10 +1530,8 @@ function update(dt) {
     }
   }
 
-  // 타이머류
+  // 타이머류 (flash/shake는 updateFx — 사망 중에도 진행)
   if (G.iframe > 0) G.iframe -= dt;
-  if (G.flash > 0) G.flash -= dt * 3;
-  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 40);
   if (G.mergeFx) { G.mergeFx.t += dt; if (G.mergeFx.t >= G.mergeFx.dur) G.mergeFx = null; }
 
   // 아군 탄
@@ -1617,12 +1649,8 @@ function update(dt) {
     if (G.shock.life <= 0) G.shock = null;
   }
 
-  // 파티클
-  for (const p of G.particles) {
-    p.life -= dt;
-    if (!p.ripple) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; }
-  }
-  G.particles = G.particles.filter(p => p.life > 0);
+  // 파티클/연출 (사망 중에도 dead 분기에서 호출됨)
+  updateFx(dt);
 
   // SF 토스트 수명 + 조준 팝업 타이머(글리치 인 애니메이션용)
   if (G.toasts && G.toasts.length) { for (const t of G.toasts) t.t += dt; G.toasts = G.toasts.filter(t => t.t < t.dur); }
