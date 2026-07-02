@@ -103,6 +103,15 @@ const norm = a => { a %= TAU; return a < 0 ? a + TAU : a; };
 // 두 각도 간 최소 차이 (절대값)
 function angDiff(a, b) { let d = norm(a) - norm(b); if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return Math.abs(d); }
 
+// 화면비 정규화 헬퍼 (B+속도 하이브리드) ----------------------------------------
+// edgeDist: 중심에서 방향 ang의 화면(직사각) 경계까지 거리 = 적이 화면에 보이는 동안의 이동거리.
+function edgeDist(ang) {
+  const c = Math.abs(Math.cos(ang)), s = Math.abs(Math.sin(ang));
+  return Math.min(c > 1e-6 ? (W / 2) / c : 1e9, s > 1e-6 ? (H / 2) / s : 1e9);
+}
+// velScale: 방사형 속도 보정 배율. 반응시간 = 거리/속도 = edge/(base·edge/Rref) = Rref/base = 방향 무관 상수.
+function velScale(ang) { return clamp(edgeDist(ang) / CFG.reactRef, CFG.velClampLo, CFG.velClampHi); }
+
 // ---- 튜닝 상수 (정의서 수치 근사) ----------------------------------------
 const CFG = {
   slotCount: 6,            // 6궤도
@@ -118,10 +127,18 @@ const CFG = {
   hpRecoverWaveClear: 10, // 웨이브 클리어 +10%
   interceptPad: 5,        // 적탄 요격 판정 여유(px) — 얇은선∩얇은점 취약성 완화
   // 정비 궤도(합성)
-  candidateR: 200,        // 후보 코어 공전 반경
+  candidateR: 200,        // 후보 코어 공전 반경(상한 — 좁은 화면에선 타원 클램프)
   orbitHold: 0.3,         // 정비 궤도 꾹(확정) 판정 시간(s). 그 전 떼면 탁(다음 항목)
   mergeSlide: 0.34,       // 압축: 재료 코어가 베이스로 이동하는 시간(s)
   mergePause: 0.24,       // 압축: 한 단계 합쳐진 뒤 다음 단계까지 텀(s) — 연쇄 가독성
+  // 화면비 정규화(B+속도 하이브리드, 모바일 세로/태블릿 가로): 모든 방사형 속도(적·적탄·플레이어탄·빔
+  // 사거리)를 edge(θ)/reactRef로 스케일 → "정사각 게임을 화면에 늘려 채우되 원은 원으로". 방어 반응시간·
+  // 공격 킬윈도우·요격 타이밍이 전방향/전기기 균일. 스폰도 타원(화면경계 밖)으로 모든 방향 가시.
+  reactRef: 430,          // 기준 반응거리(px) — 고정상수=기기 패리티. 균일 반응시간 = 430/적속도(러너 80 → 5.4s
+                          //  = 구(방향가변 5.0~7.1s) 밴드 중하단 — 승인된 조작감 페이스 보존). eval_aspect로 캘리브레이션
+  velClampLo: 0.5,        // 속도 배율 하한(옆구리 과둔 방지) — 폰 세로 0°에서 binding(잔여 격차 ~1.2×)
+  velClampHi: 1.5,        // 상한(긴축 과속 방지)
+  spawnMargin: 36,        // 스폰을 화면경계 밖으로 띄우는 여백(px)
 };
 
 // ---- 4대 속성 (정의서 5장) ------------------------------------------------
@@ -868,8 +885,9 @@ function orbitConfirm() {
     const slot = eligibleSlots()[G.selSlotIdx];
     const cand = G.candidates[G.selCandIdx];
     const a = slotAngle(slot);
+    const crx = Math.min(CFG.candidateR, W / 2 - 28), cry = Math.min(CFG.candidateR, H / 2 - 28); // 렌더와 동일한 타원 클램프
     G.flyIn = { core: G.pickedCore, slot,
-      fromX: CX + Math.cos(cand.ang) * cand.r, fromY: CY + Math.sin(cand.ang) * cand.r,
+      fromX: CX + Math.cos(cand.ang) * crx, fromY: CY + Math.sin(cand.ang) * cry,
       toX: CX + Math.cos(a) * CFG.orbitR, toY: CY + Math.sin(a) * CFG.orbitR, t: 0, dur: 0.3 };
   }
 }
@@ -1126,24 +1144,25 @@ function fireSlot(i) {
     const off = core.strands > 1 ? (s - (core.strands - 1) / 2) * core.spread : 0;
     const a = base + off;
     const bp = core.bparams || {};
+    const vs = velScale(a); // 방사형 속도/사거리 화면비 보정 — 요격 타이밍·킬윈도우 전방향 균일
     // 빔(레이저)은 이동 안 하는 히트스캔 라인 — 별도 생성.
     // life는 '발사 주기'에 맞춰 1개만 유지(중첩 누적 방지). 안 그러면 짧은 interval에서 빔이 겹쳐
     // 과도한 레이저 생성 + dmgps 중복 적용(코드과부하=interval×0.5 시 2배+) 됨.
     if (bh === 'beam') {
       const firePeriod = core.interval * (G.braking ? CFG.brakeFireScale : 1);
       G.bullets.push(tagAffix({ x: ox, y: oy, vx: 0, vy: 0, behavior: 'beam', color: core.color, combo: core.combo,
-        angle: a, range: bp.beamRange, width: bp.beamWidth, dmgps: bp.beamDmgps,
+        angle: a, range: bp.beamRange * vs, width: bp.beamWidth, dmgps: bp.beamDmgps,
         dotDps: bp.dotDps, dotTime: bp.dotTime, life: firePeriod * 1.1, pierce: 0, dmg: 0 }, fx));
       continue;
     }
     const pierce = core.pierce + (G.braking ? (G.interceptBonus || 0) : 0); // 아웃게임 요격 강화: 브레이크 관통↑
-    const b = tagAffix({ x: ox, y: oy, vx: Math.cos(a) * core.speed, vy: Math.sin(a) * core.speed,
+    const b = tagAffix({ x: ox, y: oy, vx: Math.cos(a) * core.speed * vs, vy: Math.sin(a) * core.speed * vs,
       life: core.life, r: core.bulletR, dmg: core.dmg, pierce, color: core.color, behavior: bh, combo: core.combo }, fx);
     // 메커니즘별 추가 파라미터를 탄에 부여 (코어 bparams에서)
     if (bh === 'dot') { b.dotDps = bp.dotDps; b.dotTime = bp.dotTime; }
     else if (bh === 'area') { b.puddleR = bp.puddleR; b.puddleDps = bp.puddleDps; b.puddleTime = bp.puddleTime; }
     else if (bh === 'pull') { b.pullForce = bp.pullForce; b.pullTime = bp.pullTime; }
-    else if (bh === 'delay') { b.dirX = Math.cos(a); b.dirY = Math.sin(a); b.spd = core.speed; b.age = 0;
+    else if (bh === 'delay') { b.dirX = Math.cos(a); b.dirY = Math.sin(a); b.spd = core.speed * vs; b.age = 0;
       b.pauseAt = bp.pauseAt; b.pauseFor = bp.pauseFor; b.accel = bp.accel; }
     else if (bh === 'knockback') { b.knock = bp.knock; b.shed = bp.shed; }
     else if (bh === 'fragment') { b.frags = bp.frags; b.fragSpeed = bp.fragSpeed; b.fragLife = bp.fragLife; b.fragDmg = bp.fragDmg; b.bounce = bp.bounce; }
@@ -1202,14 +1221,15 @@ function hpScale(w) {
 }
 
 function doSpawn(ang, def) {
-  const dist = Math.max(W, H) * 0.62;
+  const dist = edgeDist(ang) + CFG.spawnMargin; // 타원 스폰: 화면경계 바로 밖(모든 방향 가시)
   const x = CX + Math.cos(ang) * dist;
   const y = CY + Math.sin(ang) * dist;
   const hp = Math.round(def.hp * hpScale(G.wave));
   const e = { x, y, ang, hp, hpMax: hp, def, kind: def.kind, r: def.r, color: def.color,
+    vmul: velScale(ang), // 방사형 속도 보정(화면비 정규화)
     orbitDir: Math.random() < .5 ? 1 : -1, fireT: rand(.8, 1.8), hit: 0 };
-  // 바운서는 목표 궤도 반경 지정
-  if (def.kind === 'bouncer') e.targetR = rand(170, 240);
+  // 바운서 궤도 반경 — 짧은 축 안으로 클램프(좁은 화면에서 화면 밖 공전 방지)
+  if (def.kind === 'bouncer') e.targetR = Math.min(rand(160, 230), Math.min(W, H) * 0.4);
   G.enemies.push(e);
 }
 
@@ -1621,7 +1641,7 @@ function update(dt) {
     // T3 색조합 상태: vuln(장갑파괴) 해제 / held(홀딩·경직) 감쇠
     if (e.vulnT > 0) { e.vulnT -= dt; if (e.vulnT <= 0) e.vuln = 1; }
     if (e.held > 0) e.held -= dt;
-    const espd = e.def.speed * (e.held > 0 ? 0.2 : 1); // 홀딩 시 거의 정지
+    const espd = e.def.speed * (e.held > 0 ? 0.2 : 1) * (e.vmul || 1); // 홀딩 시 거의 정지 + 화면비 속도 보정
     const dx = CX - e.x, dy = CY - e.y;
     const d = Math.hypot(dx, dy) || 1;
     const toC = Math.atan2(dy, dx);
@@ -1638,12 +1658,14 @@ function update(dt) {
         e.x = CX + Math.cos(a) * rr; e.y = CY + Math.sin(a) * rr;
       }
     } else if (e.kind === 'shooter') {
-      if (d > 260) { e.x += (dx / d) * espd * dt; e.y += (dy / d) * espd * dt; }
+      const stopD = Math.min(260, edgeDist(e.ang) * 0.7); // 정지거리 상대화(좁은 화면서 화면 밖 사격 방지)
+      if (d > stopD) { e.x += (dx / d) * espd * dt; e.y += (dy / d) * espd * dt; }
       e.fireT -= dt;
       if (e.fireT <= 0) {
         e.fireT = rand(1.6, 2.6);
-        // 읽기 쉽게 조금 느리고 큰 단발탄 → 브레이크 정렬로 요격 가능한 창 확보
-        G.ebullets.push({ x: e.x, y: e.y, vx: Math.cos(toC) * 205, vy: Math.sin(toC) * 205, life: 5, r: 6 });
+        // 읽기 쉽게 조금 느리고 큰 단발탄 → 브레이크 정렬로 요격 가능한 창 확보. 탄속도 화면비 보정(요격 타이밍 균일).
+        const bvs = velScale(toC);
+        G.ebullets.push({ x: e.x, y: e.y, vx: Math.cos(toC) * 205 * bvs, vy: Math.sin(toC) * 205 * bvs, life: 5, r: 6 });
       }
     }
   }
@@ -2149,13 +2171,14 @@ function renderOrbit() {
     return;
   }
 
-  // 후보 공전 가이드 링
+  // 후보 공전 — 좁은 화면에선 타원으로 클램프(좌우 후보 화면 밖 클립 방지)
+  const candRX = Math.min(CFG.candidateR, W / 2 - 28), candRY = Math.min(CFG.candidateR, H / 2 - 28);
   ctx.save();
   ctx.globalAlpha = 0.12; ctx.strokeStyle = '#6fe8d6'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(CX, CY, CFG.candidateR, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(CX, CY, candRX, candRY, 0, 0, TAU); ctx.stroke();
   ctx.restore();
 
-  const candPos = c => { const bob = Math.sin(c.bob) * 4; return [CX + Math.cos(c.ang) * (c.r + bob), CY + Math.sin(c.ang) * (c.r + bob)]; };
+  const candPos = c => { const bob = Math.sin(c.bob) * 4; return [CX + Math.cos(c.ang) * (candRX + bob), CY + Math.sin(c.ang) * (candRY + bob)]; };
 
   const inSelect = G.orbitStep !== 'cand';
 
@@ -2231,10 +2254,10 @@ function render() {
 
   const hpFrac = G.hp / (G.hpMax || 100);
 
-  // --- 예고 글로우 (외곽 각도) ---
+  // --- 예고 글로우 (외곽 각도 — 화면경계 안쪽에 고정해 전방향 가시) ---
   for (const w of G.warnings) {
     const blink = 0.4 + 0.6 * Math.abs(Math.sin(G.t * 18));
-    const rr = Math.max(W, H) * 0.46;
+    const rr = Math.max(0, edgeDist(w.ang) - 22); // 경계 살짝 안쪽(타원) — 좁은 축 방향도 화면 안
     const x = CX + Math.cos(w.ang) * rr, y = CY + Math.sin(w.ang) * rr;
     ctx.save();
     ctx.globalAlpha = blink * (w.t / 0.7) * 0.9 + 0.1;

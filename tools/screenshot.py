@@ -122,6 +122,15 @@ MOBILE_SHOTS = [
         startWave(30); G.boss.hp = G.boss.hpMax * 0.55;
         startBossTelegraph(G.boss); G.boss.tele.dur = 1000; G.boss.tele.t = 700;
     }"""),
+    ("Bm2_combat_mobile.png", "모바일: 8방위 스폰 예고+적 — 타원 스폰 전방향 가시(화면비 정규화)", """() => {
+        G.enemies.length = 0; G.warnings.length = 0; G.waveActive = false; G.spawnTimer = 1e9;
+        for (let k = 0; k < 8; k++) { const a = k / 8 * Math.PI * 2;
+          const def = [ENEMY.runner, ENEMY.bouncer, ENEMY.shooter, ENEMY.shielder][k % 4];
+          G.warnings.push({ ang: a, t: 0.7, def }); doSpawn(a, def); }
+    }"""),
+    ("Bm4_orbit_mobile.png", "모바일: 정비궤도 후보 — 타원 클램프(좌우 클립 없음)", """() => {
+        G.slots[0] = makeT1Id('streamPing'); enterOrbit();
+    }"""),
 ]
 
 

@@ -354,6 +354,35 @@ DRIVE_JS = r"""
       if (b.atkT < bossAtkPeriod(b) - 1e-6) throw new Error("p2Rush 후 공격주기가 정상 복귀 안 함: " + b.atkT);
     });
 
+    // ===== 화면비 정규화 (B+속도 하이브리드 — 모바일 세로/태블릿 가로) =====
+    step("aspect-spawn-edge", () => {
+      newGame(); G.enemies = [];
+      doSpawn(0, ENEMY.runner);
+      const e = G.enemies[0];
+      const d = Math.hypot(e.x - CX, e.y - CY);
+      if (Math.abs(d - (edgeDist(0) + CFG.spawnMargin)) > 1) throw new Error("타원 스폰 반경 불일치: " + d);
+      if (Math.abs(e.vmul - velScale(0)) > 1e-9) throw new Error("스폰 vmul(속도 보정) 미설정");
+    });
+    step("aspect-player-velscale", () => {
+      newGame(); G.slots = [makeT1Id("streamPing"), null, null, null, null, null]; reapplyChassisToAllCores();
+      const spdAt = rot => { G.rot = rot; G.bullets = []; fireSlot(0); const b = G.bullets[0]; return Math.hypot(b.vx, b.vy); };
+      const r = spdAt(0) / spdAt(Math.PI / 2), want = velScale(0) / velScale(Math.PI / 2);
+      if (Math.abs(r - want) > 0.01) throw new Error("플레이어 탄속 velScale 미적용: " + r.toFixed(3) + " vs " + want.toFixed(3));
+    });
+    step("aspect-beam-range-scale", () => {
+      newGame(); const spec = T2_CORES.find(s => s.behavior === "beam");
+      G.slots = [makeT2FromIds(spec.parents[0], spec.parents[1]), null, null, null, null, null]; reapplyChassisToAllCores();
+      const rngAt = rot => { G.rot = rot; G.bullets = []; fireSlot(0); return G.bullets.find(b => b.behavior === "beam").range; };
+      const r = rngAt(0) / rngAt(Math.PI / 2), want = velScale(0) / velScale(Math.PI / 2);
+      if (Math.abs(r - want) > 0.01) throw new Error("빔 사거리 velScale 미적용: " + r.toFixed(3));
+    });
+    step("aspect-bouncer-clamp", () => {
+      newGame(); G.enemies = [];
+      for (let i = 0; i < 12; i++) doSpawn(i, ENEMY.bouncer);
+      const lim = Math.min(W, H) * 0.4 + 1e-6;
+      if (!G.enemies.every(e => e.targetR <= lim)) throw new Error("바운서 궤도가 짧은 축 안으로 클램프 안 됨");
+    });
+
     // ===== 아웃게임(메타) =====
     step("meta-save", () => {
       if (!SAVE || SAVE.v !== 1) throw new Error("SAVE 손상");
