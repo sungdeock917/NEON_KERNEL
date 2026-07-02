@@ -8,7 +8,8 @@
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #04060a; touch-action: none; }
   #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; background: radial-gradient(circle at 50% 50%, #0a1018 0%, #04060a 70%); cursor: crosshair; }
+  /* 배경 그라데이션은 캔버스 내부에서 그림(alpha:false 불투명 캔버스 — 컴포지터 블렌딩 제거) */
+  canvas { display: block; background: #04060a; cursor: crosshair; }
   /* 텍스트 제로 원칙: 게임 자체엔 텍스트가 없지만, 프로토타입 테스터이므로
      디버그/조작 안내 오버레이만 최소한으로 둔다 (H로 토글). */
   #help {
@@ -51,9 +52,20 @@
 //============================================================================
 
 const cv = document.getElementById('c');
-const ctx = cv.getContext('2d');
+// alpha:false = 불투명 캔버스(페이지와의 알파 블렌딩 제거), desynchronized = 컴포지터 큐 우회(잔렉↓).
+// 배경 그라데이션은 CSS가 아닌 캔버스 안에서 그린다(resize의 bgGrad).
+const ctx = cv.getContext('2d', { alpha: false, desynchronized: true });
 const hud = document.getElementById('hud');
 const help = document.getElementById('help');
+// HUD DOM 쓰기 스로틀: 매 프레임 textContent 갱신은 DOM 레이아웃/리페인트를 강제해 잔렉 유발(실측 —
+// 스톨 프레임의 JS 시간 0.2~0.5ms = 원인이 JS가 아닌 컴포지터/DOM). 변경시에만 + 최대 5Hz.
+let hudLast = '', hudNextT = 0;
+function setHud(s) {
+  if (s === hudLast) return;
+  const now = performance.now();
+  if (now < hudNextT) return;
+  hudNextT = now + 200; hudLast = s; hud.textContent = s;
+}
 
 // ── 성능: shadowBlur 글로우 비용 제어 ─────────────────────────────────────────
 // Canvas2D shadowBlur는 드로우마다 GPU 블러 패스를 강제해 다수 엔티티(탄·적·파티클)
@@ -82,7 +94,7 @@ function neonGlow(list, rScale, alpha, colorOf) {
 }
 
 // ---- 화면 / 좌표 ----------------------------------------------------------
-let W = 0, H = 0, CX = 0, CY = 0, DPR = 1;
+let W = 0, H = 0, CX = 0, CY = 0, DPR = 1, bgGrad = null;
 function resize() {
   // DPR 상한 1.5: 고DPI/대형 화면에서 백킹스토어 픽셀 폭증 억제(네온 룩은 1.5로 충분, shadowBlur·fill 비용 비례 감소)
   DPR = Math.min(window.devicePixelRatio || 1, 1.5);
@@ -91,7 +103,11 @@ function resize() {
   cv.width = Math.floor(W * DPR); cv.height = Math.floor(H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   CX = W / 2; CY = H / 2;
+  // 배경 라디얼 그라데이션(구 CSS 배경) — 불투명 캔버스라 매 프레임 이걸로 클리어
+  bgGrad = ctx.createRadialGradient(CX, CY, 0, CX, CY, Math.max(W, H) * 0.7);
+  bgGrad.addColorStop(0, '#0a1018'); bgGrad.addColorStop(1, '#04060a');
 }
+function paintBg() { ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H); }
 window.addEventListener('resize', resize);
 resize();
 
@@ -2246,7 +2262,7 @@ function renderOrbit() {
 }
 
 function render() {
-  ctx.clearRect(0, 0, W, H);
+  paintBg(); // 불투명 캔버스: clearRect 대신 배경 그라데이션으로 클리어
 
   // 화면 흔들림
   ctx.save();
@@ -2259,21 +2275,25 @@ function render() {
     const blink = 0.4 + 0.6 * Math.abs(Math.sin(G.t * 18));
     const rr = Math.max(0, edgeDist(w.ang) - 22); // 경계 살짝 안쪽(타원) — 좁은 축 방향도 화면 안
     const x = CX + Math.cos(w.ang) * rr, y = CY + Math.sin(w.ang) * rr;
-    ctx.save();
-    ctx.globalAlpha = blink * (w.t / 0.7) * 0.9 + 0.1;
+    // 웨이브마다 다수 등장 — shadowBlur 금지(스폰 리듬 잔렉 원인), 가산 헤일로 2패스로 글로우
+    ctx.save(); glowMul = 0;
+    ctx.globalAlpha = (blink * (w.t / 0.7) * 0.9 + 0.1) * 0.4;
+    ctx.globalCompositeOperation = 'lighter';
     ctx.fillStyle = w.def.color;
-    ctx.shadowColor = w.def.color; ctx.shadowBlur = 24;
-    ctx.beginPath(); ctx.arc(x, y, 14, 0, TAU); ctx.fill();
-    ctx.restore();
+    ctx.beginPath(); ctx.arc(x, y, 26, 0, TAU); ctx.fill(); // 헤일로
+    ctx.globalAlpha = blink * (w.t / 0.7) * 0.9 + 0.1;
+    ctx.beginPath(); ctx.arc(x, y, 14, 0, TAU); ctx.fill(); // 코어
+    glowMul = 1; ctx.restore();
   }
 
-  // --- 장판/중력장 (area·hold 코어) — 바닥 레이어 ---
+  // --- 장판/중력장 (area·hold 코어) — 바닥 레이어 (큰 반투명 원 — 블러 불필요, 핫 요소) ---
+  glowMul = 0;
   for (const pd of G.puddles) {
     const a = clamp(pd.life / pd.max, 0, 1);
     const rr = pd.r * (0.6 + 0.4 * a);
     ctx.save();
     ctx.globalAlpha = 0.18 + 0.22 * a;
-    ctx.fillStyle = pd.color; ctx.shadowColor = pd.color; ctx.shadowBlur = 16;
+    ctx.fillStyle = pd.color;
     ctx.beginPath(); ctx.arc(pd.x, pd.y, rr, 0, TAU); ctx.fill();
     ctx.globalAlpha = 0.55 * a; ctx.lineWidth = 1.5; ctx.strokeStyle = pd.color;
     ctx.beginPath(); ctx.arc(pd.x, pd.y, rr, 0, TAU); ctx.stroke();
@@ -2283,6 +2303,7 @@ function render() {
     }
     ctx.restore();
   }
+  glowMul = 1;
 
   // --- 적 탄 (보스 시그니처 탄은 보스 색 + 외곽 코어로 구분) ---
   neonGlow(G.ebullets, 1.9, 0.5, b => b.boss ? (b.color || '#ff5d54') : '#ff7a54'); // 싼 가산 글로우(블러 대체)
@@ -2677,11 +2698,11 @@ function render() {
   // 코어 시험장 HUD
   if (G.bench) {
     const sp = T1_CORES[G.benchIdx];
-    hud.textContent =
+    setHud(
       `◈ 코어 시험장  [${G.benchIdx + 1}/8]  ·  B=나가기` +
       `\n${ATTR[sp.attr].name} — ${sp.name}` +
       `\n메커니즘: ${sp.fx}` +
-      `\n1~8 또는 [ ] = 코어 전환  ·  탁/꾹으로 조준`;
+      `\n1~8 또는 [ ] = 코어 전환  ·  탁/꾹으로 조준`);
     return;
   }
   // 회전 방향 / 페이즈 / 슬롯 구성
@@ -2690,7 +2711,7 @@ function render() {
   const candLabel = !sc ? '' : sc.boost ? '스탯 강화 ' + sc.boost.name
     : sc.affix ? (sc.affix.slot === 'prefix' ? '형태' : '효과') + ' 모듈 ' + sc.affix.name
     : sc.core.label + (sc.core.fx ? ' (' + sc.core.fx + ')' : '');
-  hud.textContent =
+  setHud(
     `WAVE ${G.wave}  |  KILL ${G.score}  |  NOVA×${G.novaCount}` +
     `\nROT ${G.dir > 0 ? '↻ 시계' : '↺ 반시계'}` +
     (G.phase === 'orbit'
@@ -2707,7 +2728,7 @@ function render() {
     `\nCHASSIS: ${G.chassis ? G.chassis.short : getChassis().short}  (Q/E or 1-5)` +
     `\nAFFIX: ${affixHudStr()}  (A키 순환)` +
     (G.reviveOffer ? `\n◈ 이어하기 — 탭! (보스전 1회, ${Math.ceil(G.reviveOffer.dur - G.reviveOffer.t)}s)`
-      : G.dead ? '\n☠ TERMINATED — R로 재시작' : '  ·  Enter=정비궤도');
+      : G.dead ? '\n☠ TERMINATED — R로 재시작' : '  ·  Enter=정비궤도'));
 }
 
 function currentDrain() {
@@ -2985,7 +3006,7 @@ function renderResult() {
 }
 
 function renderMeta() {
-  ctx.clearRect(0, 0, W, H); // 캔버스 네온 배경(CSS) 비침
+  paintBg(); // 불투명 캔버스: 배경 그라데이션으로 클리어
   // 미세 글리치 스캔라인
   ctx.save(); ctx.globalAlpha = 0.05;
   for (let i = 0; i < 3; i++) { ctx.fillStyle = i % 2 ? '#39f4d0' : '#7fe9ff'; ctx.fillRect(0, (Math.sin(metaT * 0.7 + i * 2) * 0.5 + 0.5) * H, W, 1.5); }
@@ -3002,9 +3023,17 @@ function renderMeta() {
 // 루프
 //============================================================================
 let last = performance.now();
+// dt 스무딩: 산발적 프레임 드랍(OS/컴포지터 히컵 — 실측상 JS 0.3ms인데 41~54ms 갭) 시 dt가 튀면
+// 오브젝트가 순간이동해 잔렉으로 보인다. 최근 5프레임 중앙값의 1.3배로 클램프 — 고립 드랍은 부드럽게,
+// 지속적 저fps(예: 30fps 고정)에는 5프레임 내 적응해 슬로모 없음.
+const dtHist = [1 / 60, 1 / 60, 1 / 60, 1 / 60, 1 / 60];
+let dtHi = 0;
 function loop(now) {
   let dt = (now - last) / 1000; last = now;
   dt = Math.min(dt, 0.05); // 스파이크 클램프
+  const med = [...dtHist].sort((a, b) => a - b)[2];
+  dtHist[dtHi] = dt; dtHi = (dtHi + 1) % 5;
+  dt = Math.min(dt, med * 1.3);
   if (scene === 'game') {
     if (G.hitStop > 0) { G.hitStop -= dt; dt *= 0.1; } // 히트스톱(역체감, 정의서 12)
     update(dt);
